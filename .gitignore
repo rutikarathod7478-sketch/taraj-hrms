@@ -40,10 +40,30 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 node_modules/
+.next/
+dist/
+build/
+.env
+.env.local
+.env.development.local
+.env.production.local
+*.log
+
+# Dependencies
+node_modules/
+
+# Build files
+.next/
+dist/
+build/
+
+# Environment variables
 .env
 .env.*
 !.env.example
-dist/
-build/
-.next/
-uploads/
+
+# Logs
+*.log
+
+# HRMS uploaded documents
+/public/uploads/
