@@ -45,9 +45,15 @@ export async function GET(request: NextRequest) {
         return new NextResponse('filePath is required', { status: 400 });
       }
 
-      // Restrict access within public/uploads or uploads
-      const cleanPath = filePath.replace(/^\/+/, '');
-      const diskPath = path.join(process.cwd(), 'public', cleanPath.replace(/^public\//, ''));
+      // Enforce strict path normalization and verify strictly within public/uploads
+      const uploadsBaseDir = path.resolve(process.cwd(), 'public', 'uploads');
+      const cleanPath = filePath.replace(/^\/+/, '').replace(/^public[\\/]/, '').replace(/^uploads[\\/]/, '');
+      const diskPath = path.resolve(uploadsBaseDir, cleanPath);
+
+      // Disallow path traversal escaping the uploads directory
+      if (!diskPath.startsWith(uploadsBaseDir) || filePath.includes('..')) {
+        return new NextResponse('Access denied: Invalid document path', { status: 403 });
+      }
 
       if (!fs.existsSync(diskPath)) {
         return new NextResponse('Document not found on storage server', { status: 404 });
@@ -59,6 +65,9 @@ export async function GET(request: NextRequest) {
       if (ext === '.pdf') mimeType = 'application/pdf';
       else if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
       else if (ext === '.png') mimeType = 'image/png';
+      else if (ext === '.webp') mimeType = 'image/webp';
+      else if (ext === '.docx') mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      else if (ext === '.doc') mimeType = 'application/msword';
 
       const isView = action === 'view_document' || searchParams.get('view') === 'true';
       const disposition = isView ? 'inline' : 'attachment';

@@ -2,7 +2,17 @@ import crypto from 'crypto';
 import { cookies } from 'next/headers';
 import { UserSession } from '@/types/employee';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'hrims_dev_secret_key_taraj_global_solutions_2026';
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET?.trim();
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('CRITICAL SECURITY ERROR: JWT_SECRET environment variable is required in production.');
+    }
+    return 'hrims_dev_local_fallback_secret';
+  }
+  return secret;
+}
+
 export const SESSION_COOKIE_NAME = 'hrims_session';
 
 /**
@@ -15,16 +25,12 @@ export function hashPassword(password: string): string {
 }
 
 /**
- * Verify password against stored PBKDF2 hash or legacy seed
+ * Verify password against stored PBKDF2 hash
  */
 export function verifyPassword(password: string, storedHash: string): boolean {
-  if (!storedHash || typeof storedHash !== 'string') return false;
+  if (!storedHash || typeof storedHash !== 'string' || !storedHash.includes(':')) return false;
 
   try {
-    if (!storedHash.includes(':')) {
-      return password === 'admin123' || password === 'password123';
-    }
-
     const [salt, key] = storedHash.split(':');
     if (!salt || !key) return false;
 
@@ -56,7 +62,7 @@ export function createToken(payload: UserSession): string {
   ).toString('base64url');
 
   const signature = crypto
-    .createHmac('sha256', JWT_SECRET)
+    .createHmac('sha256', getJwtSecret())
     .update(`${header}.${body}`)
     .digest('base64url');
 
@@ -73,7 +79,7 @@ export function verifyToken(token: string): UserSession | null {
     const [header, body, signature] = parts;
 
     const expectedSignature = crypto
-      .createHmac('sha256', JWT_SECRET)
+      .createHmac('sha256', getJwtSecret())
       .update(`${header}.${body}`)
       .digest('base64url');
 

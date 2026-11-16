@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCandidateById, updateCandidate } from '@/features/candidates/candidate.service';
+import { getSessionUser } from '@/lib/auth/session';
 
 export async function GET(
   request: NextRequest,
@@ -30,6 +31,21 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: 'Unauthorized. Please sign in to edit candidate details.' },
+        { status: 401 }
+      );
+    }
+
+    if (user.role !== 'super_admin' && user.role !== 'hr_manager') {
+      return NextResponse.json(
+        { success: false, error: 'Forbidden. HR Manager or Administrator permissions required.' },
+        { status: 403 }
+      );
+    }
+
     const { id } = await params;
     const candidateId = Number(id);
     const body = await request.json();
