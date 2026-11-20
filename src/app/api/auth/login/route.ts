@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     }
 
     const rows = await query<RowDataPacket[]>(
-      'SELECT id, username, email, full_name, role, department_id, password_hash, is_active FROM users WHERE username = ? OR email = ? LIMIT 1',
+      'SELECT id, username, email, full_name, avatar_url, role, department_id, password_hash, is_active FROM users WHERE username = ? OR email = ? LIMIT 1',
       [username.trim(), username.trim()]
     );
 
@@ -41,6 +41,7 @@ export async function POST(request: Request) {
       full_name: user.full_name,
       role: user.role,
       department_id: user.department_id,
+      avatar_url: user.avatar_url ?? null,
     };
 
     const token = createToken(sessionPayload);

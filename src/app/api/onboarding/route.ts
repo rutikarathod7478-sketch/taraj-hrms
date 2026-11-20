@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+import { get as getBlob } from '@vercel/blob';
+import { getSessionUser } from '@/lib/auth/session';
 import {
   getOnboardingList,
   updateOnboardingChecklist,
@@ -40,18 +43,88 @@ export async function GET(request: NextRequest) {
 
     // 2. Secure view/download of uploaded candidate document
     if (action === 'view_document' || action === 'download_document') {
-      const filePath = searchParams.get('filePath');
+      let filePath = searchParams.get('filePath');
       if (!filePath) {
         return new NextResponse('filePath is required', { status: 400 });
       }
 
-      // Enforce strict path normalization and verify strictly within public/uploads
+      // 1. Verify user authentication
+      const user = await getSessionUser();
+      if (!user) {
+        return new NextResponse('Unauthorized: Please log in to view candidate documents', { status: 401 });
+      }
+
+      // If filePath was passed as a nested /api/onboarding URL with filePath query param, unwrap it
+      if (filePath.includes('filePath=')) {
+        try {
+          const parsed = new URL(filePath, 'http://localhost');
+          const inner = parsed.searchParams.get('filePath');
+          if (inner) filePath = inner;
+        } catch {}
+      }
+
+      const isView = action === 'view_document' || searchParams.get('view') === 'true';
+      const disposition = isView ? 'inline' : 'attachment';
+
+      // 2. Handle Private Vercel Blob storage (Production)
+      const isBlob =
+        filePath.startsWith('http://') ||
+        filePath.startsWith('https://') ||
+        filePath.includes('vercel-storage.com');
+
+      if (isBlob) {
+        try {
+          const blobToken =
+            process.env.BLOB_READ_WRITE_TOKEN || process.env.HRMS_DOCUMENTS_READ_WRITE_TOKEN;
+
+          const blobResult = await getBlob(filePath, {
+            access: 'private',
+            token: blobToken,
+          });
+
+          if (!blobResult || blobResult.statusCode !== 200 || !blobResult.stream) {
+            return new NextResponse('Document not found in storage', { status: 404 });
+          }
+
+          const filename = blobResult.blob.pathname
+            ? path.basename(blobResult.blob.pathname)
+            : 'document.pdf';
+
+          return new NextResponse(blobResult.stream, {
+            status: 200,
+            headers: {
+              'Content-Type': blobResult.blob.contentType || 'application/pdf',
+              'Content-Disposition': `${disposition}; filename="${filename}"`,
+              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+            },
+          });
+        } catch (blobErr: any) {
+          console.error('[Onboarding] Error streaming blob file:', blobErr);
+          return new NextResponse(`Error retrieving document from storage: ${blobErr.message}`, { status: 500 });
+        }
+      }
+
+      // 3. Handle Local Filesystem storage (Localhost & /tmp fallback)
       const uploadsBaseDir = path.resolve(process.cwd(), 'public', 'uploads');
       const cleanPath = filePath.replace(/^\/+/, '').replace(/^public[\\/]/, '').replace(/^uploads[\\/]/, '');
-      const diskPath = path.resolve(uploadsBaseDir, cleanPath);
+      let diskPath = path.resolve(uploadsBaseDir, cleanPath);
+
+      // Check /tmp fallback if running in serverless container
+      if (!fs.existsSync(diskPath)) {
+        const tmpBaseDir = path.resolve(os.tmpdir(), 'uploads');
+        const tmpPath = path.resolve(tmpBaseDir, cleanPath);
+        if (fs.existsSync(tmpPath)) {
+          diskPath = tmpPath;
+        }
+      }
 
       // Disallow path traversal escaping the uploads directory
-      if (!diskPath.startsWith(uploadsBaseDir) || filePath.includes('..')) {
+      const tmpBaseDir = path.resolve(os.tmpdir(), 'uploads');
+      const isAllowedDir =
+        (diskPath.startsWith(uploadsBaseDir) || diskPath.startsWith(tmpBaseDir)) &&
+        !filePath.includes('..');
+
+      if (!isAllowedDir) {
         return new NextResponse('Access denied: Invalid document path', { status: 403 });
       }
 
@@ -68,15 +141,16 @@ export async function GET(request: NextRequest) {
       else if (ext === '.webp') mimeType = 'image/webp';
       else if (ext === '.docx') mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       else if (ext === '.doc') mimeType = 'application/msword';
-
-      const isView = action === 'view_document' || searchParams.get('view') === 'true';
-      const disposition = isView ? 'inline' : 'attachment';
+      else if (ext === '.webm') mimeType = 'audio/webm';
+      else if (ext === '.mp3') mimeType = 'audio/mpeg';
+      else if (ext === '.wav') mimeType = 'audio/wav';
 
       return new NextResponse(fileBuffer, {
         status: 200,
         headers: {
           'Content-Type': mimeType,
           'Content-Disposition': `${disposition}; filename="${path.basename(diskPath)}"`,
+          'Cache-Control': 'private, no-cache, no-store, must-revalidate',
         },
       });
     }
@@ -430,6 +504,24 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // Auto-resolve offered salary / CTC from request body, hiring decision, or candidate expected CTC
+      let salary = body.salary;
+      if (!salary) {
+        try {
+          const hdRows = await query<RowDataPacket[]>(
+            'SELECT offered_salary FROM hiring_decisions WHERE candidate_id = ? AND is_current = 1 LIMIT 1',
+            [candidate.id]
+          );
+          if (hdRows && hdRows.length > 0 && hdRows[0].offered_salary) {
+            salary = hdRows[0].offered_salary;
+          } else if (candidate.expected_ctc) {
+            salary = candidate.expected_ctc;
+          }
+        } catch (hdErr) {
+          salary = candidate.expected_ctc;
+        }
+      }
+
       // If joining date or offer email is being sent, also record in joining_records
       if (
         effectiveJoiningDate ||
@@ -455,6 +547,7 @@ export async function POST(request: NextRequest) {
         departmentName: candidate.department_name,
         candidateType: candidate.candidate_type,
         joiningDate: effectiveJoiningDate,
+        salary,
         notes,
         candidateCode: candidate.candidate_code,
         acceptanceDeadline,
@@ -474,14 +567,26 @@ export async function POST(request: NextRequest) {
       try {
         if (templateType === 'offer_letter') {
           const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'offer_letters');
-          if (!fs.existsSync(uploadsDir)) {
-            fs.mkdirSync(uploadsDir, { recursive: true });
-          }
-          const pdfFilePath = path.join(uploadsDir, `offer_letter_${candidate.id}.pdf`);
+          let pdfFilePath = path.join(uploadsDir, `offer_letter_${candidate.id}.pdf`);
 
-          const pdfBytes = await generateOfferLetterPdf({ candidateId: candidate.id });
+          const pdfBytes = await generateOfferLetterPdf({
+            candidateId: candidate.id,
+            salary,
+            joiningDate: effectiveJoiningDate,
+          });
           const pdfBuffer = Buffer.from(pdfBytes);
-          fs.writeFileSync(pdfFilePath, pdfBuffer);
+
+          try {
+            if (!fs.existsSync(uploadsDir)) {
+              fs.mkdirSync(uploadsDir, { recursive: true });
+            }
+            fs.writeFileSync(pdfFilePath, pdfBuffer);
+          } catch {
+            const tmpDir = path.join(os.tmpdir(), 'offer_letters');
+            fs.mkdirSync(tmpDir, { recursive: true });
+            pdfFilePath = path.join(tmpDir, `offer_letter_${candidate.id}.pdf`);
+            fs.writeFileSync(pdfFilePath, pdfBuffer);
+          }
 
           const safeName = (candidate.full_name || 'Candidate').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
           attachments.push({
@@ -493,14 +598,26 @@ export async function POST(request: NextRequest) {
           });
         } else if (templateType === 'appointment_letter') {
           const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'appointment_letters');
-          if (!fs.existsSync(uploadsDir)) {
-            fs.mkdirSync(uploadsDir, { recursive: true });
-          }
-          const pdfFilePath = path.join(uploadsDir, `appointment_letter_${candidate.id}.pdf`);
+          let pdfFilePath = path.join(uploadsDir, `appointment_letter_${candidate.id}.pdf`);
 
-          const pdfBytes = await getOrGenerateAppointmentLetterPdf({ candidateId: candidate.id });
+          const pdfBytes = await getOrGenerateAppointmentLetterPdf({
+            candidateId: candidate.id,
+            salary,
+            joiningDate: effectiveJoiningDate,
+          });
           const pdfBuffer = Buffer.from(pdfBytes);
-          fs.writeFileSync(pdfFilePath, pdfBuffer);
+
+          try {
+            if (!fs.existsSync(uploadsDir)) {
+              fs.mkdirSync(uploadsDir, { recursive: true });
+            }
+            fs.writeFileSync(pdfFilePath, pdfBuffer);
+          } catch {
+            const tmpDir = path.join(os.tmpdir(), 'appointment_letters');
+            fs.mkdirSync(tmpDir, { recursive: true });
+            pdfFilePath = path.join(tmpDir, `appointment_letter_${candidate.id}.pdf`);
+            fs.writeFileSync(pdfFilePath, pdfBuffer);
+          }
 
           const safeName = (candidate.full_name || 'Candidate').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
           attachments.push({

@@ -103,7 +103,11 @@ function InterviewManagementContent() {
       const res = await fetch(`/api/interviews?${params.toString()}`);
       const data = await res.json();
       if (res.ok && data.data) {
-        setInterviews(data.data);
+        // Automatically remove any interview round that is done/completed or cancelled
+        const activeOnly = data.data.filter(
+          (iv: InterviewItem) => iv.status !== 'completed' && iv.status !== 'cancelled'
+        );
+        setInterviews(activeOnly);
       }
     } catch (err: any) {
       showToast(err.message || 'Failed to load interviews', 'error');
@@ -147,27 +151,47 @@ function InterviewManagementContent() {
     fetchDepartments();
   }, []);
 
-  // Filter candidates who have NOT completed or scheduled BOTH Tech and Practical rounds
+  // Filter candidates who are NOT employees and have NOT completed all interview rounds
   const eligibleCandidates = useMemo(() => {
     return candidates.filter((c) => {
-      // Always allow the candidate explicitly opened via URL parameter or current selection
+      const status = (c.status || c.application_status || '').toLowerCase();
+      // Exclude if already an employee, joined, hired, offered, or rejected
       if (
-        (candidateIdParam && String(c.id) === String(candidateIdParam)) ||
-        (scheduleData.candidate_id && String(c.id) === String(scheduleData.candidate_id))
+        status === 'rejected' ||
+        status === 'joined' ||
+        status === 'hired' ||
+        status === 'offered' ||
+        status.includes('join') ||
+        Boolean((c as any).is_employee) ||
+        Boolean((c as any).employee_code)
       ) {
-        return true;
+        return false;
       }
 
-      const status = (c.status || c.application_status || '').toLowerCase();
-      if (status === 'rejected' || status === 'joined' || status.includes('join') || (c as any).is_employee || (c as any).employee_code) return false;
+      // Exclude if candidate already completed Round 3 (Practical / final) -> all rounds completed
+      const hasPracticalScore = c.round_3_score !== null && c.round_3_score !== undefined && c.round_3_score !== '';
+      const hasPracticalCompleted = (c as any).practical_interview_status === 'completed' || (c as any).practical_interview_score !== null;
+      if (hasPracticalScore || hasPracticalCompleted) {
+        return false;
+      }
+
+      // Exclude if candidate completed final round in interviews
+      const hasFinalInterviewCompleted = interviews.some(
+        (iv) => iv.candidate_id === c.id && iv.round_type === 'final' && (iv.status === 'completed' || (iv as any).total_score !== null)
+      );
+      if (hasFinalInterviewCompleted) {
+        return false;
+      }
 
       const hasTechScore = c.round_2_score !== null && c.round_2_score !== undefined && c.round_2_score !== '';
-      const hasPracticalScore = c.round_3_score !== null && c.round_3_score !== undefined && c.round_3_score !== '';
-
-      const hasTechInterview = interviews.some((iv) => iv.candidate_id === c.id && iv.round_type === 'department' && iv.status !== 'cancelled');
-      const hasPracticalInterview = interviews.some((iv) => iv.candidate_id === c.id && iv.round_type === 'final' && iv.status !== 'cancelled');
-
+      const hasTechInterview = interviews.some(
+        (iv) => iv.candidate_id === c.id && iv.round_type === 'department' && iv.status !== 'cancelled'
+      );
       const isTechDone = Boolean(hasTechScore || hasTechInterview);
+
+      const hasPracticalInterview = interviews.some(
+        (iv) => iv.candidate_id === c.id && iv.round_type === 'final' && iv.status !== 'cancelled'
+      );
       const isPracticalDone = Boolean(hasPracticalScore || hasPracticalInterview);
 
       // If that candidate is done/scheduled with both Tech and Practical, hide from candidate list
@@ -175,7 +199,7 @@ function InterviewManagementContent() {
 
       return true;
     });
-  }, [candidates, interviews, candidateIdParam, scheduleData.candidate_id]);
+  }, [candidates, interviews]);
 
   // Compute available rounds for selected candidate with strict sequential enforcement
   const availableRounds = useMemo(() => {
@@ -393,12 +417,6 @@ function InterviewManagementContent() {
         }
       }
     });
-    // Add default demo days if set is small
-    if (set.size === 0) {
-      set.add(16);
-      set.add(17);
-      set.add(18);
-    }
     return set;
   }, [interviews, year, month]);
 
@@ -599,7 +617,7 @@ function InterviewManagementContent() {
                 ) : displayedInterviews.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="py-12 text-center text-slate-400">
-                      No interviews scheduled on the selected date or round filter.
+                      No active online interviews scheduled on the selected date or round filter.
                     </td>
                   </tr>
                 ) : (
@@ -736,7 +754,7 @@ function InterviewManagementContent() {
               })}
             </select>
             <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
-              Candidates who have finished or been scheduled for both Tech and Practical are hidden.
+              Candidates who are employees or who have completed all rounds are hidden.
             </p>
           </div>
 

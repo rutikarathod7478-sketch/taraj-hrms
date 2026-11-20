@@ -20,7 +20,8 @@ export default function ManagerInterviewsPage() {
         const res = await fetch('/api/interviews?round_type=dept_round');
         const data = await res.json();
         if (res.ok && data.data) {
-          setInterviews(data.data);
+          const activeOnly = data.data.filter((iv: any) => iv.status !== 'completed' && iv.status !== 'cancelled');
+          setInterviews(activeOnly);
         }
       } catch (err: any) {
         showToast(err.message || 'Error loading interviews', 'error');

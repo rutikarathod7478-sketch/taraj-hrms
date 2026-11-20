@@ -7,6 +7,10 @@ import {
 } from '@/features/candidates/candidate.service';
 import { query } from '@/lib/db/mysql';
 import { saveUploadedFile } from '@/lib/storage/file-storage';
+import { getSessionUser } from '@/lib/auth/session';
+import { sendEmail, generateCandidateEmailTemplate, retryPendingEmails } from '@/lib/email/mailer';
+import { isValidAadhar, isValidPan, isValid10DigitPhone } from '@/lib/validators/common';
+import { extractTextFromBuffer, parseResumeText } from '@/lib/resume/resume-parser';
 import { RowDataPacket } from 'mysql2/promise';
 
 export async function GET(request: NextRequest) {
@@ -184,8 +188,8 @@ export async function POST(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const action = searchParams.get('action');
 
-    // Handle CV / Resume file upload
-    if (action === 'upload_cv') {
+    // Handle CV / Resume file upload and auto-parsing
+    if (action === 'upload_cv' || action === 'parse_resume') {
       const formData = await request.formData();
       const file = formData.get('file');
 
@@ -194,10 +198,40 @@ export async function POST(request: NextRequest) {
       }
 
       const stored = await saveUploadedFile('resumes', file);
+
+      // Extract and parse resume content for form auto-filling
+      let parsed = null;
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const originalName = file instanceof File ? file.name : 'resume.pdf';
+        const rawText = await extractTextFromBuffer(buffer, originalName);
+        parsed = parseResumeText(rawText);
+      } catch (parseErr) {
+        console.warn('[CandidatesAPI] Resume parsing warning:', parseErr);
+      }
+
       return NextResponse.json({
         success: true,
         data: stored,
         filePath: stored.filePath,
+        originalFilename: stored.originalName,
+        parsed,
+      });
+    }
+
+    // Automatically batch-retry pending & rate-limited emails
+    if (action === 'retry_failed_emails' || action === 'retry_pending_emails') {
+      const user = await getSessionUser();
+      if (!user) {
+        return NextResponse.json({ success: false, error: 'Unauthorized.' }, { status: 401 });
+      }
+
+      const retryResult = await retryPendingEmails(15);
+      return NextResponse.json({
+        success: true,
+        message: `Processed ${retryResult.processed} queued email(s): ${retryResult.sent} delivered, ${retryResult.failed} waiting for mail server reset.`,
+        data: retryResult,
       });
     }
 
@@ -211,12 +245,42 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!isValid10DigitPhone(body.phone)) {
+      return NextResponse.json(
+        { success: false, error: 'Mobile number must be exactly 10 digits.' },
+        { status: 400 }
+      );
+    }
+
+    if (body.aadhar_id && !isValidAadhar(body.aadhar_id)) {
+      return NextResponse.json(
+        { success: false, error: 'Aadhar card number must be exactly 12 digits.' },
+        { status: 400 }
+      );
+    }
+
+    if (body.pan_id && !isValidPan(body.pan_id)) {
+      return NextResponse.json(
+        { success: false, error: 'PAN card must be exactly 10 characters (e.g. ABCDE1234F).' },
+        { status: 400 }
+      );
+    }
+
+    if (body.refer_phone && body.refer_phone.trim() && !isValid10DigitPhone(body.refer_phone)) {
+      return NextResponse.json(
+        { success: false, error: 'Referral phone number must be exactly 10 digits.' },
+        { status: 400 }
+      );
+    }
+
     const candidate = await registerCandidate({
       full_name: body.full_name,
       email: body.email,
       phone: body.phone,
       date_of_birth: body.date_of_birth,
       address: body.address,
+      aadhar_id: body.aadhar_id,
+      pan_id: body.pan_id,
       candidate_type: body.candidate_type || 'Experienced',
       department_id: Number(body.department_id),
       position_id: Number(body.position_id),
@@ -229,6 +293,10 @@ export async function POST(request: NextRequest) {
       expected_ctc: body.expected_ctc,
       notice_period: body.notice_period ? Number(body.notice_period) : 0,
       notes: body.notes,
+      refer_first_name: body.refer_first_name,
+      refer_middle_name: body.refer_middle_name,
+      refer_last_name: body.refer_last_name,
+      refer_phone: body.refer_phone,
       registration_source: body.registration_source || 'web_portal',
       resume_file_path: body.resume_file_path,
       resume_original_name: body.resume_original_name,

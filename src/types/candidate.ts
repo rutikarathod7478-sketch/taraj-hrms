@@ -21,6 +21,8 @@ export interface Candidate {
   phone: string;
   date_of_birth?: string | null;
   address?: string | null;
+  aadhar_id?: string | null;
+  pan_id?: string | null;
   candidate_type: CandidateType;
   department_id: number;
   position_id: number;
@@ -35,6 +37,10 @@ export interface Candidate {
   notice_period?: number | null; // in days
   resume_file_path?: string | null;
   resume_original_name?: string | null;
+  refer_first_name?: string | null;
+  refer_middle_name?: string | null;
+  refer_last_name?: string | null;
+  refer_phone?: string | null;
   application_status: CandidateStatus;
   status?: CandidateStatus; // Alias for UI
   registration_source?: string;
@@ -102,6 +108,8 @@ export interface CandidateRegistrationInput {
   phone: string;
   date_of_birth?: string;
   address?: string;
+  aadhar_id?: string;
+  pan_id?: string;
   candidate_type?: CandidateType;
   department_id: number;
   position_id: number;
@@ -114,6 +122,10 @@ export interface CandidateRegistrationInput {
   expected_ctc?: string;
   notice_period?: number;
   notes?: string;
+  refer_first_name?: string;
+  refer_middle_name?: string;
+  refer_last_name?: string;
+  refer_phone?: string;
   registration_source?: string;
   resume_file_path?: string;
   resume_original_name?: string;

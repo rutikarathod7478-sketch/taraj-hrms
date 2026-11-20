@@ -7,7 +7,27 @@ export function isValidEmail(email: string): boolean {
 export function isValidPhone(phone: string): boolean {
   if (!phone || typeof phone !== 'string') return false;
   const digits = phone.replace(/\D/g, '');
-  return digits.length >= 10 && digits.length <= 15;
+  return digits.length === 10;
+}
+
+export function isValid10DigitPhone(phone: string): boolean {
+  if (!phone || typeof phone !== 'string') return false;
+  const digits = phone.replace(/\D/g, '');
+  return digits.length === 10;
+}
+
+export function isValidAadhar(aadhar: string): boolean {
+  if (!aadhar || typeof aadhar !== 'string') return false;
+  const digits = aadhar.replace(/\D/g, '');
+  return digits.length === 12;
+}
+
+export function isValidPan(pan: string): boolean {
+  if (!pan || typeof pan !== 'string') return false;
+  const cleaned = pan.trim().toUpperCase();
+  // Standard Indian PAN format: 5 uppercase letters, 4 digits, 1 uppercase letter
+  const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
+  return panRegex.test(cleaned);
 }
 
 export function isNonEmptyString(val: unknown): val is string {

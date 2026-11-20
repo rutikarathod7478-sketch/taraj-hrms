@@ -122,8 +122,19 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({ user, onLogout }) => {
       <div className="p-3 border-t border-slate-800 bg-slate-950/70 shrink-0">
         <div className="flex items-center justify-between p-2 rounded-lg bg-slate-900/80 border border-slate-800/80">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-slate-700 to-slate-600 flex items-center justify-center font-semibold text-xs text-white shrink-0">
-              {user?.full_name?.charAt(0) || 'U'}
+            <div className="w-8 h-8 rounded-lg overflow-hidden shrink-0 border border-slate-700 bg-slate-800 flex items-center justify-center">
+              {user?.avatar_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={user.avatar_url}
+                  alt={user?.full_name || 'User'}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="w-full h-full bg-gradient-to-tr from-slate-700 to-slate-600 flex items-center justify-center font-semibold text-xs text-white">
+                  {user?.full_name?.charAt(0) || 'U'}
+                </div>
+              )}
             </div>
             <div className="truncate">
               <p className="text-xs font-semibold text-white truncate">{user?.full_name || 'Admin User'}</p>

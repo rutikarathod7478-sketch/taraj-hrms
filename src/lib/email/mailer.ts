@@ -1,5 +1,6 @@
 import nodemailer, { type Transporter, type SendMailOptions } from 'nodemailer';
-import { execute } from '@/lib/db/mysql';
+import { execute, query } from '@/lib/db/mysql';
+import type { RowDataPacket } from 'mysql2/promise';
 
 export interface EmailPayload {
   to: string;
@@ -56,9 +57,35 @@ function isPlaceholderPassword(pass: string | undefined): boolean {
   );
 }
 
+let cachedTransporter: Transporter | null = null;
+let cachedFallbackTransporter: Transporter | null = null;
+
+function getFallbackTransporter(): Transporter | null {
+  const host = process.env.FALLBACK_SMTP_HOST?.trim();
+  const user = process.env.FALLBACK_SMTP_USER?.trim();
+  let pass = process.env.FALLBACK_SMTP_PASS?.trim();
+  if (pass && ((pass.startsWith('"') && pass.endsWith('"')) || (pass.startsWith("'") && pass.endsWith("'")))) {
+    pass = pass.slice(1, -1);
+  }
+  const port = parseInt(process.env.FALLBACK_SMTP_PORT || '587', 10);
+  const isSecure = process.env.FALLBACK_SMTP_SECURE === 'true' || port === 465;
+
+  if (!host || !user || !pass) return null;
+  if (cachedFallbackTransporter) return cachedFallbackTransporter;
+
+  cachedFallbackTransporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: isSecure,
+    auth: { user, pass },
+    tls: { rejectUnauthorized: false },
+  });
+  return cachedFallbackTransporter;
+}
+
 /**
  * Configure SMTP Transporter using environment settings.
- * Defaults sender and auth user to hr@tarajglobal.com.
+ * Utilizes connection pooling and pacing to prevent Hostinger burst rate limits.
  */
 function getSmtpTransporter(): Transporter | null {
   const host = process.env.SMTP_HOST?.trim();
@@ -74,7 +101,16 @@ function getSmtpTransporter(): Transporter | null {
     return null;
   }
 
-  return nodemailer.createTransport({
+  if (cachedTransporter) {
+    return cachedTransporter;
+  }
+
+  cachedTransporter = nodemailer.createTransport({
+    pool: true,
+    maxConnections: 1,
+    maxMessages: 50,
+    rateDelta: 1500, // Pace dispatches by 1.5s to prevent burst firewall flags
+    rateLimit: 1,
     host,
     port,
     secure: isSecure,
@@ -85,10 +121,12 @@ function getSmtpTransporter(): Transporter | null {
     tls: {
       rejectUnauthorized: false,
     },
-    connectionTimeout: 12000,
-    greetingTimeout: 12000,
-    socketTimeout: 12000,
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 15000,
   });
+
+  return cachedTransporter;
 }
 
 /**
@@ -102,7 +140,7 @@ export async function sendEmail(payload: EmailPayload): Promise<SendEmailResult>
   const replyTo = process.env.HR_NOTIFICATION_EMAIL || process.env.SMTP_USER || 'info@tgstechinfo.com';
   const rawPass = process.env.SMTP_PASS;
 
-  let status: 'sent' | 'failed' = 'failed';
+  let status: 'sent' | 'failed' | 'pending' = 'failed';
   let errorMessage: string | null = null;
   let messageId: string | undefined = undefined;
 
@@ -126,6 +164,8 @@ export async function sendEmail(payload: EmailPayload): Promise<SendEmailResult>
         throw new Error('Failed to initialize SMTP transporter.');
       }
 
+
+      
       const mailOptions: SendMailOptions = {
         from: configuredFrom,
         to: payload.to,
@@ -155,20 +195,40 @@ export async function sendEmail(payload: EmailPayload): Promise<SendEmailResult>
         console.log(`[Mailer] Attaching ${payload.attachments.length} file(s) via SMTP (attachment disposition):`, payload.attachments.map(a => a.filename));
       }
 
-      const info = await transporter.sendMail(mailOptions);
+      let info;
+      try {
+        info = await transporter.sendMail(mailOptions);
+      } catch (firstErr: any) {
+        const msg = firstErr?.message || '';
+        const fallback = getFallbackTransporter();
+        if (fallback && (msg.includes('451') || msg.toLowerCase().includes('ratelimit'))) {
+          console.warn(`[Mailer] Primary SMTP rate limit hit (${msg}). Switching to Fallback SMTP for ${payload.to}...`);
+          info = await fallback.sendMail(mailOptions);
+        } else if (msg.includes('451') || msg.includes('421') || msg.includes('ETIMEDOUT') || msg.includes('ECONNRESET')) {
+          console.warn(`[Mailer] Transient SMTP issue (${msg}), retrying dispatch in 2s for ${payload.to}...`);
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          info = await transporter.sendMail(mailOptions);
+        } else {
+          throw firstErr;
+        }
+      }
 
       status = 'sent';
       messageId = info.messageId;
       console.log(`[Mailer] Email sent successfully to ${payload.to} (MessageId: ${messageId})`);
     } catch (err: unknown) {
-      status = 'failed';
       const errorObj = err as Error;
       const rawError = errorObj?.message || 'Failed to dispatch email via SMTP server.';
 
-      // Graceful classification of authentication errors
-      if (rawError.includes('535') || rawError.toLowerCase().includes('authentication failed')) {
+      // Graceful classification of authentication and rate limit errors
+      if (rawError.includes('451') || rawError.toLowerCase().includes('ratelimit')) {
+        status = 'pending';
+        errorMessage = `SMTP Rate Limit Exceeded: Hostinger outbound email limit reached (${rawError}). Outbound email queued in email_logs for automatic delivery as soon as mail server rate limit resets.`;
+      } else if (rawError.includes('535') || rawError.toLowerCase().includes('authentication failed')) {
+        status = 'failed';
         errorMessage = `SMTP authentication failed: Invalid username or password for ${process.env.SMTP_USER || 'info@tgstechinfo.com'}. Please verify SMTP_PASS in .env.local.`;
       } else {
+        status = 'failed';
         errorMessage = rawError;
       }
 
@@ -176,14 +236,15 @@ export async function sendEmail(payload: EmailPayload): Promise<SendEmailResult>
     }
   }
 
-  // Persist attempt in MySQL email_logs
+  // Persist attempt in MySQL email_logs with full content_html for automated replay/retry
   try {
     await execute(
-      `INSERT INTO email_logs (recipient_email, subject, template_type, status, error_message, sent_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO email_logs (recipient_email, subject, content_html, template_type, status, error_message, sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         payload.to,
         payload.subject,
+        payload.contentHtml || null,
         payload.templateType,
         status,
         errorMessage,
@@ -203,6 +264,85 @@ export async function sendEmail(payload: EmailPayload): Promise<SendEmailResult>
 }
 
 /**
+ * Automatically retry queued and rate-limited emails with backoff and spacing.
+ */
+export async function retryPendingEmails(maxBatch = 5): Promise<{
+  processed: number;
+  sent: number;
+  failed: number;
+}> {
+  try {
+    const rows = await query<RowDataPacket[]>(
+      `SELECT * FROM email_logs 
+       WHERE (status = 'pending' OR (status = 'failed' AND error_message LIKE '%Ratelimit%' AND retry_count < 10))
+       AND content_html IS NOT NULL AND content_html != ''
+       ORDER BY id ASC 
+       LIMIT ?`,
+      [maxBatch]
+    );
+
+    if (!rows || rows.length === 0) {
+      return { processed: 0, sent: 0, failed: 0 };
+    }
+
+    let sent = 0;
+    let failed = 0;
+    const transporter = getSmtpTransporter();
+    const fallback = getFallbackTransporter();
+
+    for (const row of rows) {
+      // Space dispatches by 2.5s
+      await new Promise((r) => setTimeout(r, 2500));
+
+      const mailOptions: SendMailOptions = {
+        from: process.env.SMTP_FROM || '"Taraj Global Solutions" <info@tgstechinfo.com>',
+        to: row.recipient_email,
+        subject: row.subject,
+        html: row.content_html,
+      };
+
+      try {
+        let activeTransporter = transporter;
+        let info;
+        try {
+          if (!activeTransporter) throw new Error('Primary transporter unavailable');
+          info = await activeTransporter.sendMail(mailOptions);
+        } catch (firstErr: any) {
+          const errMsg = firstErr?.message || '';
+          if (fallback && (errMsg.includes('451') || errMsg.toLowerCase().includes('ratelimit'))) {
+            info = await fallback.sendMail(mailOptions);
+          } else {
+            throw firstErr;
+          }
+        }
+
+        await execute(
+          `UPDATE email_logs 
+           SET status = 'sent', error_message = NULL, sent_at = CURRENT_TIMESTAMP, retry_count = retry_count + 1 
+           WHERE id = ?`,
+          [row.id]
+        );
+        sent++;
+        console.log(`[MailerRetry] Successfully dispatched queued email #${row.id} to ${row.recipient_email}`);
+      } catch (retryErr: any) {
+        failed++;
+        await execute(
+          `UPDATE email_logs 
+           SET retry_count = retry_count + 1, error_message = ? 
+           WHERE id = ?`,
+          [retryErr?.message || 'Retry failed', row.id]
+        );
+      }
+    }
+
+    return { processed: rows.length, sent, failed };
+  } catch (err) {
+    console.error('[MailerRetry] Failed to process email retry batch:', err);
+    return { processed: 0, sent: 0, failed: 0 };
+  }
+}
+
+/**
  * Standard email notification templates
  */
 export function generateCandidateEmailTemplate(
@@ -219,6 +359,8 @@ export function generateCandidateEmailTemplate(
     candidateType?: string;
     documentTitle?: string;
     remarks?: string;
+    salary?: string;
+    officeLocation?: string;
   }
 ): { subject: string; html: string; text?: string } {
   switch (type) {
@@ -253,6 +395,24 @@ export function generateCandidateEmailTemplate(
               <p style="font-size: 14px; color: #334155; line-height: 1.65;">
                 We are pleased to extend an offer of employment to you for the position of <strong>${jobRole}</strong> in the <strong>${deptName}</strong> department at Taraj Global Solutions.
               </p>
+
+              <!-- Offer Summary Box -->
+              <div style="margin: 20px 0; padding: 18px 20px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-left: 5px solid #03a6ff; border-radius: 8px;">
+                <h3 style="margin: 0 0 10px 0; font-size: 13px; font-weight: 800; color: #14213d; text-transform: uppercase; letter-spacing: 0.5px;">
+                  📋 Employment Offer Summary
+                </h3>
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; color: #1e293b;">
+                  <tbody>
+                    <tr><td style="padding: 4px 0; color: #64748b; width: 38%;">Candidate Name:</td><td style="padding: 4px 0; font-weight: 700;">${data.candidateName}</td></tr>
+                    ${data.candidateCode ? `<tr><td style="padding: 4px 0; color: #64748b;">Candidate ID:</td><td style="padding: 4px 0; font-weight: 600; font-family: monospace;">${data.candidateCode}</td></tr>` : ''}
+                    <tr><td style="padding: 4px 0; color: #64748b;">Designation:</td><td style="padding: 4px 0; font-weight: 700;">${jobRole}</td></tr>
+                    <tr><td style="padding: 4px 0; color: #64748b;">Department:</td><td style="padding: 4px 0; font-weight: 700;">${deptName}</td></tr>
+                    ${data.joiningDate ? `<tr><td style="padding: 4px 0; color: #64748b;">Proposed Joining Date:</td><td style="padding: 4px 0; font-weight: 700; color: #0284c7;">${data.joiningDate}</td></tr>` : ''}
+                    ${data.salary ? `<tr><td style="padding: 4px 0; color: #64748b;">Annual CTC:</td><td style="padding: 4px 0; font-weight: 700; color: #16a34a;">${data.salary}</td></tr>` : ''}
+                    <tr><td style="padding: 4px 0; color: #64748b;">Acceptance Deadline:</td><td style="padding: 4px 0; font-weight: 600; color: #ea580c;">${deadline}</td></tr>
+                  </tbody>
+                </table>
+              </div>
               
               <p style="font-size: 14px; color: #334155; line-height: 1.65;">
                 Please find attached your Offer Letter in PDF format, outlining the details of your position, compensation, proposed date of joining, and applicable terms and conditions.
@@ -626,6 +786,24 @@ export function generateCandidateEmailTemplate(
               <p style="font-size: 14px; color: #334155; line-height: 1.65;">
                 Please find attached your official Appointment Letter in PDF format, detailing your employment terms, benefits, responsibilities, and company guidelines.
               </p>
+
+              <!-- Appointment Summary Box -->
+              <div style="margin: 20px 0; padding: 18px 20px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-left: 5px solid #03a6ff; border-radius: 8px;">
+                <h3 style="margin: 0 0 10px 0; font-size: 13px; font-weight: 800; color: #14213d; text-transform: uppercase; letter-spacing: 0.5px;">
+                  📋 Appointment Summary
+                </h3>
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; color: #1e293b;">
+                  <tbody>
+                    <tr><td style="padding: 4px 0; color: #64748b; width: 38%;">Candidate Name:</td><td style="padding: 4px 0; font-weight: 700;">${data.candidateName}</td></tr>
+                    ${data.candidateCode ? `<tr><td style="padding: 4px 0; color: #64748b;">Candidate ID:</td><td style="padding: 4px 0; font-weight: 600; font-family: monospace;">${data.candidateCode}</td></tr>` : ''}
+                    <tr><td style="padding: 4px 0; color: #64748b;">Designation:</td><td style="padding: 4px 0; font-weight: 700;">${jobRole}</td></tr>
+                    <tr><td style="padding: 4px 0; color: #64748b;">Department:</td><td style="padding: 4px 0; font-weight: 700;">${deptName}</td></tr>
+                    ${data.joiningDate ? `<tr><td style="padding: 4px 0; color: #64748b;">Date of Joining:</td><td style="padding: 4px 0; font-weight: 700; color: #0284c7;">${data.joiningDate}</td></tr>` : ''}
+                    ${data.salary ? `<tr><td style="padding: 4px 0; color: #64748b;">Annual CTC:</td><td style="padding: 4px 0; font-weight: 700; color: #16a34a;">${data.salary}</td></tr>` : ''}
+                    <tr><td style="padding: 4px 0; color: #64748b;">Office Location:</td><td style="padding: 4px 0; font-weight: 600;">The Space Business Complex, Kharadi, Pune, Maharashtra</td></tr>
+                  </tbody>
+                </table>
+              </div>
 
               <!-- Prominent Official PDF Attachment Callout Box -->
               <div style="margin: 22px 0; padding: 18px 20px; background-color: #f0fdf4; border: 1.5px solid #86efac; border-left: 5px solid #16a34a; border-radius: 8px;">

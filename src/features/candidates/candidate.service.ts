@@ -348,17 +348,21 @@ export async function registerCandidate(input: CandidateRegistrationInput): Prom
     const insertCandidateSql = `
       INSERT INTO candidates (
         candidate_code, full_name, email, phone, date_of_birth, address,
+        aadhar_id, pan_id,
         candidate_type, department_id, position_id, qualification,
         college_or_institution, graduation_year, experience_years,
         current_employer, current_ctc, expected_ctc, notice_period,
         resume_file_path, resume_original_name, application_status,
+        refer_first_name, refer_middle_name, refer_last_name, refer_phone,
         registration_source, qr_token, notes
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
+        ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, 'registered',
+        ?, ?, ?, ?,
         ?, ?, ?
       )
     `;
@@ -370,6 +374,8 @@ export async function registerCandidate(input: CandidateRegistrationInput): Prom
       input.phone.trim(),
       input.date_of_birth || null,
       input.address || null,
+      input.aadhar_id ? input.aadhar_id.trim() : null,
+      input.pan_id ? input.pan_id.trim().toUpperCase() : null,
       input.candidate_type || 'Experienced',
       input.department_id,
       input.position_id,
@@ -383,6 +389,10 @@ export async function registerCandidate(input: CandidateRegistrationInput): Prom
       input.notice_period || 0,
       input.resume_file_path || null,
       input.resume_original_name || null,
+      input.refer_first_name ? input.refer_first_name.trim() : null,
+      input.refer_middle_name ? input.refer_middle_name.trim() : null,
+      input.refer_last_name ? input.refer_last_name.trim() : null,
+      input.refer_phone ? input.refer_phone.trim() : null,
       input.registration_source || 'web_portal',
       qrToken,
       input.notes || null,
@@ -446,21 +456,35 @@ export async function registerCandidate(input: CandidateRegistrationInput): Prom
         candidateCode: created.candidate_code,
       });
 
-      await sendEmail({
+      const candMailRes = await sendEmail({
         to: created.email,
         subject: emailTemplate.subject,
         templateType: 'registration_confirmation',
         contentHtml: emailTemplate.html,
         contentText: emailTemplate.text,
       });
+
+      if (!candMailRes.success) {
+        console.warn(`[CandidateService] Candidate registration confirmation email notice: ${candMailRes.error}`);
+      }
     } catch (mailErr) {
       console.error('[CandidateService] Failed to send registration confirmation email:', mailErr);
     }
   }
 
-  // 2. Automatically dispatch new candidate alert to HR team (info@tgstechinfo.com)
+  // 2. Automatically dispatch new candidate alert to HR team
   const hrRecipient = process.env.HR_NOTIFICATION_EMAIL || process.env.SMTP_USER || 'info@tgstechinfo.com';
-  if (hrRecipient) {
+  const smtpUser = process.env.SMTP_USER || 'info@tgstechinfo.com';
+  // Avoid sending redundant self-email to the same mailbox to conserve candidate quota
+  const shouldSendHrEmail =
+    hrRecipient &&
+    process.env.DISABLE_HR_REGISTRATION_EMAILS !== 'true' &&
+    hrRecipient.trim().toLowerCase() !== smtpUser.trim().toLowerCase();
+
+  if (shouldSendHrEmail) {
+    // Add brief 2s delay between dispatches to avoid triggering Hostinger burst limits
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
     try {
       const hrTemplate = generateHrRegistrationAlertTemplate({
         candidateId: created.id,
@@ -527,6 +551,30 @@ export async function updateCandidate(
   if (data.address !== undefined) {
     fields.push('address = ?');
     values.push(data.address);
+  }
+  if (data.aadhar_id !== undefined) {
+    fields.push('aadhar_id = ?');
+    values.push(data.aadhar_id ? data.aadhar_id.trim() : null);
+  }
+  if (data.pan_id !== undefined) {
+    fields.push('pan_id = ?');
+    values.push(data.pan_id ? data.pan_id.trim().toUpperCase() : null);
+  }
+  if (data.refer_first_name !== undefined) {
+    fields.push('refer_first_name = ?');
+    values.push(data.refer_first_name ? data.refer_first_name.trim() : null);
+  }
+  if (data.refer_middle_name !== undefined) {
+    fields.push('refer_middle_name = ?');
+    values.push(data.refer_middle_name ? data.refer_middle_name.trim() : null);
+  }
+  if (data.refer_last_name !== undefined) {
+    fields.push('refer_last_name = ?');
+    values.push(data.refer_last_name ? data.refer_last_name.trim() : null);
+  }
+  if (data.refer_phone !== undefined) {
+    fields.push('refer_phone = ?');
+    values.push(data.refer_phone ? data.refer_phone.trim() : null);
   }
   if (data.qualification !== undefined) {
     fields.push('qualification = ?');

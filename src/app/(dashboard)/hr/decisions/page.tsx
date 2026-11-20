@@ -935,7 +935,11 @@ export default function InterviewResultsPage() {
                       <div>
                         <span className="text-[10px] text-slate-400 block font-medium">CV / Resume</span>
                         <a
-                          href={cand.resume_file_path}
+                          href={
+                            cand.resume_file_path.startsWith('/api/')
+                              ? cand.resume_file_path
+                              : `/api/onboarding?action=view_document&filePath=${encodeURIComponent(cand.resume_file_path)}`
+                          }
                           target="_blank"
                           rel="noopener noreferrer"
                           className="inline-flex items-center gap-1 font-bold text-blue-600 dark:text-blue-400 hover:underline mt-0.5"

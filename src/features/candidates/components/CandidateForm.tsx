@@ -27,7 +27,9 @@ import {
   FileCheck2,
   Check,
   DollarSign,
-  Clock
+  Clock,
+  CreditCard,
+  Users
 } from 'lucide-react';
 
 export interface CandidateFormProps {
@@ -54,6 +56,8 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
     email: initialData?.email || '',
     mobileNumber: initialData?.phone || '',
     alternateContact: '',
+    aadharId: initialData?.aadhar_id || '',
+    panId: initialData?.pan_id || '',
     location: initialData?.address || '',
     candidateType: initialData?.candidate_type || 'Experienced',
     departmentId: initialData?.department_id ? String(initialData.department_id) : '2',
@@ -67,6 +71,10 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
     expectedCtc: initialData?.expected_ctc || '',
     noticePeriod: initialData?.notice_period || 30,
     notes: initialData?.notes || '',
+    referFirstName: initialData?.refer_first_name || '',
+    referMiddleName: initialData?.refer_middle_name || '',
+    referLastName: initialData?.refer_last_name || '',
+    referPhone: initialData?.refer_phone || '',
     resumeFile: null,
   });
 
@@ -74,7 +82,22 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [dragOver, setDragOver] = useState<boolean>(false);
+  const [step2DragOver, setStep2DragOver] = useState<boolean>(false);
   const [agreedToTerms, setAgreedToTerms] = useState<boolean>(true);
+  const [isParsingResume, setIsParsingResume] = useState<boolean>(false);
+  const [parsedSummary, setParsedSummary] = useState<{
+    designation?: string;
+    skillsCount: number;
+    education?: string;
+    candidateType: string;
+    experienceYears?: number;
+  } | null>(null);
+  const [preUploadedResumePath, setPreUploadedResumePath] = useState<string | null>(
+    initialData?.resume_file_path || null
+  );
+  const [preUploadedOriginalName, setPreUploadedOriginalName] = useState<string | null>(
+    initialData?.resume_original_name || null
+  );
 
   // Load positions when department changes
   useEffect(() => {
@@ -156,6 +179,117 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
     handleChange('resumeFile', file);
   };
 
+  const handleResumeAutoFillUpload = async (file: File) => {
+    if (!file) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      showToast('File size exceeds the 15MB limit.', 'error');
+      return;
+    }
+
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (!['pdf', 'doc', 'docx'].includes(ext || '')) {
+      showToast('Please upload a valid PDF or Word document (.pdf, .doc, .docx).', 'error');
+      return;
+    }
+
+    setIsParsingResume(true);
+    try {
+      const uploadBody = new FormData();
+      uploadBody.append('file', file);
+      uploadBody.append('folder', 'resumes');
+
+      const res = await fetch('/api/candidates?action=parse_resume', {
+        method: 'POST',
+        body: uploadBody,
+      });
+
+      const resData = await res.json();
+      if (!res.ok) {
+        throw new Error(resData.error || 'Failed to analyze resume.');
+      }
+
+      // Store uploaded file info
+      handleChange('resumeFile', file);
+      if (resData.filePath) {
+        setPreUploadedResumePath(resData.filePath);
+        setPreUploadedOriginalName(resData.originalFilename || file.name);
+      }
+
+      const parsed = resData.parsed;
+      if (parsed) {
+        const detectedType: 'Fresher' | 'Experienced' = parsed.candidateType || 'Experienced';
+
+        setFormData((prev) => {
+          const next = { ...prev };
+          next.candidateType = detectedType;
+
+          if (detectedType === 'Fresher') {
+            if (parsed.education) next.education = parsed.education;
+            if (parsed.collegeOrInstitution) next.previousCompany = parsed.collegeOrInstitution;
+            if (parsed.skills) next.skills = parsed.skills;
+            if (parsed.projects) next.projects = parsed.projects;
+            if (parsed.expectedCtc) next.expectedCtc = parsed.expectedCtc;
+          } else {
+            if (parsed.previousCompany) next.previousCompany = parsed.previousCompany;
+            if (parsed.designation) next.designation = parsed.designation;
+            if (parsed.skills) next.skills = parsed.skills;
+            if (parsed.projects) next.projects = parsed.projects;
+            if (parsed.currentCtc) next.currentCtc = parsed.currentCtc;
+            if (parsed.expectedCtc) next.expectedCtc = parsed.expectedCtc;
+            if (parsed.noticePeriod !== undefined && parsed.noticePeriod !== null) {
+              next.noticePeriod = parsed.noticePeriod;
+            }
+            if (parsed.education) next.education = parsed.education;
+          }
+
+          // Also populate personal info if missing
+          if (!next.email && parsed.email) next.email = parsed.email;
+          if (!next.mobileNumber && parsed.phone) next.mobileNumber = parsed.phone;
+          if (!next.firstName && parsed.fullName) {
+            const parts = parsed.fullName.split(' ');
+            next.firstName = parts[0];
+            if (parts.length > 1) next.lastName = parts.slice(1).join(' ');
+          }
+
+          return next;
+        });
+
+        // Clear validation errors for auto-filled fields
+        setFormErrors((prev) => {
+          const clean = { ...prev };
+          delete clean.education;
+          delete clean.previousCompany;
+          delete clean.designation;
+          delete clean.expectedCtc;
+          delete clean.resumeFile;
+          return clean;
+        });
+
+        const skillsCount = parsed.skills ? parsed.skills.split(',').length : 0;
+        setParsedSummary({
+          designation: parsed.designation,
+          skillsCount,
+          education: parsed.education,
+          candidateType: detectedType,
+          experienceYears: parsed.experienceYears,
+        });
+
+        showToast(
+          `Resume parsed successfully! Auto-filled as ${detectedType} with skills and background.`,
+          'success'
+        );
+      } else {
+        showToast('Resume uploaded! Please fill in your experience details below.', 'success');
+      }
+    } catch (err: unknown) {
+      const e = err as Error;
+      showToast(e.message || 'Failed to auto-parse resume. Please enter details manually.', 'error');
+    } finally {
+      setIsParsingResume(false);
+    }
+  };
+
   const validateStep = (stepNumber: number): boolean => {
     const errors: Record<string, string> = {};
 
@@ -167,11 +301,34 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
       } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
         errors.email = 'Valid email is required';
       }
+      const phoneDigits = formData.mobileNumber.replace(/\D/g, '');
       if (!formData.mobileNumber.trim()) {
         errors.mobileNumber = 'Phone number is required';
-      } else if (!/^\+?[\d\s-]{10,15}$/.test(formData.mobileNumber.trim())) {
-        errors.mobileNumber = 'Valid 10-digit mobile number required';
+      } else if (phoneDigits.length !== 10) {
+        errors.mobileNumber = 'Mobile number must be exactly 10 digits';
       }
+
+      const aadharDigits = (formData.aadharId || '').replace(/\D/g, '');
+      if (!formData.aadharId?.trim()) {
+        errors.aadharId = 'Aadhar card number is required';
+      } else if (aadharDigits.length !== 12) {
+        errors.aadharId = 'Aadhar number must be exactly 12 digits';
+      }
+
+      const panVal = (formData.panId || '').trim().toUpperCase();
+      if (!panVal) {
+        errors.panId = 'PAN card number is required';
+      } else if (!/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(panVal)) {
+        errors.panId = 'PAN card must be exactly 10 characters (e.g. ABCDE1234F)';
+      }
+
+      if (formData.referPhone?.trim()) {
+        const refDigits = formData.referPhone.replace(/\D/g, '');
+        if (refDigits.length !== 10) {
+          errors.referPhone = 'Referral phone number must be exactly 10 digits';
+        }
+      }
+
       if (!formData.location.trim()) errors.location = 'Current location is required';
       if (!formData.departmentId) errors.departmentId = 'Department is required';
       if (!formData.positionId) errors.positionId = 'Position is required';
@@ -188,7 +345,7 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
     }
 
     if (stepNumber === 3) {
-      const isCvRequired = !initialData?.resume_file_path;
+      const isCvRequired = !initialData?.resume_file_path && !preUploadedResumePath;
       if (isCvRequired && !formData.resumeFile) {
         errors.resumeFile = 'Resume / CV file is required';
       }
@@ -236,7 +393,7 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const isCvRequired = !initialData?.resume_file_path;
+    const isCvRequired = !initialData?.resume_file_path && !preUploadedResumePath;
     const validation = validateCandidateForm(formData, isCvRequired);
 
     if (!validation.isValid) {
@@ -248,6 +405,9 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
         validation.errors.lastName ||
         validation.errors.email ||
         validation.errors.mobileNumber ||
+        validation.errors.aadharId ||
+        validation.errors.panId ||
+        validation.errors.referPhone ||
         validation.errors.location ||
         validation.errors.departmentId ||
         validation.errors.positionId
@@ -273,11 +433,11 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
 
     setIsSubmitting(true);
     try {
-      // 1. Upload CV if a file was selected
-      let resumePath = initialData?.resume_file_path || null;
-      let resumeOriginalName = initialData?.resume_original_name || null;
+      // 1. Upload CV if a file was selected and not already uploaded
+      let resumePath = preUploadedResumePath || initialData?.resume_file_path || null;
+      let resumeOriginalName = preUploadedOriginalName || initialData?.resume_original_name || null;
 
-      if (formData.resumeFile) {
+      if (formData.resumeFile && (!preUploadedResumePath || formData.resumeFile.name !== preUploadedOriginalName)) {
         const uploadBody = new FormData();
         uploadBody.append('file', formData.resumeFile);
         uploadBody.append('folder', 'resumes');
@@ -288,7 +448,8 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
         });
 
         if (!uploadRes.ok) {
-          throw new Error('Failed to upload CV document. Please verify file type and size.');
+          const errData = await uploadRes.json().catch(() => null);
+          throw new Error(errData?.error || 'Failed to upload CV document. Please verify file type and size.');
         }
 
         const uploadData = await uploadRes.json();
@@ -301,17 +462,30 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
         .filter(Boolean)
         .join(' ');
 
+      const expYears =
+        formData.candidateType === 'Fresher'
+          ? 0
+          : parsedSummary?.experienceYears !== undefined
+          ? parsedSummary.experienceYears
+          : 2;
+
       const payload = {
         full_name: fullName,
         email: formData.email.trim(),
         phone: formData.mobileNumber.trim(),
         date_of_birth: formData.dateOfBirth || null,
         address: formData.location.trim(),
+        aadhar_id: formData.aadharId?.trim() || null,
+        pan_id: formData.panId?.trim().toUpperCase() || null,
+        refer_first_name: formData.referFirstName?.trim() || null,
+        refer_middle_name: formData.referMiddleName?.trim() || null,
+        refer_last_name: formData.referLastName?.trim() || null,
+        refer_phone: formData.referPhone?.trim() || null,
         candidate_type: formData.candidateType,
         department_id: Number(formData.departmentId),
         position_id: Number(formData.positionId),
         qualification: formData.education || null,
-        experience_years: formData.candidateType === 'Fresher' ? 0 : 2,
+        experience_years: expYears,
         current_employer: formData.previousCompany || null,
         current_ctc: formData.currentCtc || null,
         expected_ctc: formData.expectedCtc || null,
@@ -641,16 +815,20 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
 
                   <div>
                     <label htmlFor="mobileNumber" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      Mobile Number <span className="text-red-500">*</span>
+                      Mobile Number <span className="text-red-500">*</span> <span className="text-slate-400 font-normal">(10 digits)</span>
                     </label>
                     <div className="relative">
                       <input
                         id="mobileNumber"
                         type="tel"
                         required
+                        maxLength={10}
                         value={formData.mobileNumber}
-                        onChange={(e) => handleChange('mobileNumber', e.target.value)}
-                        placeholder="+91 9876543210"
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+                          handleChange('mobileNumber', val);
+                        }}
+                        placeholder="9876543210"
                         className={`w-full pl-8 pr-3 py-2 rounded-xl border text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 transition-all ${
                           formErrors.mobileNumber
                             ? 'border-red-400 focus:ring-red-500/20'
@@ -667,7 +845,72 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
                   </div>
                 </div>
 
-                {/* Row 4: Department & Position (2 cols) */}
+                {/* Row 4: Aadhar Card ID and PAN Card ID (2 cols) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="aadharId" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Aadhar Card ID <span className="text-red-500">*</span> <span className="text-slate-400 font-normal">(12 digits)</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="aadharId"
+                        type="text"
+                        required
+                        maxLength={12}
+                        value={formData.aadharId || ''}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/\D/g, '').slice(0, 12);
+                          handleChange('aadharId', val);
+                        }}
+                        placeholder="12-digit Aadhar (e.g. 123456789012)"
+                        className={`w-full pl-8 pr-3 py-2 rounded-xl border text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 transition-all tracking-wider ${
+                          formErrors.aadharId
+                            ? 'border-red-400 focus:ring-red-500/20'
+                            : 'border-slate-200 dark:border-slate-700 focus:ring-blue-500/20 focus:border-blue-500'
+                        }`}
+                      />
+                      <CreditCard className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                    {formErrors.aadharId && (
+                      <p className="text-[11px] text-red-500 mt-1 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" /> {formErrors.aadharId}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label htmlFor="panId" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      PAN Card ID <span className="text-red-500">*</span> <span className="text-slate-400 font-normal">(10 characters)</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="panId"
+                        type="text"
+                        required
+                        maxLength={10}
+                        value={formData.panId || ''}
+                        onChange={(e) => {
+                          const val = e.target.value.toUpperCase().slice(0, 10);
+                          handleChange('panId', val);
+                        }}
+                        placeholder="10-digit PAN (e.g. ABCDE1234F)"
+                        className={`w-full pl-8 pr-3 py-2 rounded-xl border text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 transition-all uppercase tracking-wider ${
+                          formErrors.panId
+                            ? 'border-red-400 focus:ring-red-500/20'
+                            : 'border-slate-200 dark:border-slate-700 focus:ring-blue-500/20 focus:border-blue-500'
+                        }`}
+                      />
+                      <ShieldCheck className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                    {formErrors.panId && (
+                      <p className="text-[11px] text-red-500 mt-1 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" /> {formErrors.panId}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Row 5: Department & Position (2 cols) */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
                   <div>
                     <label htmlFor="departmentId" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
@@ -715,6 +958,97 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
                     )}
                   </div>
                 </div>
+
+                {/* Refer a Friend Section */}
+                <div className="pt-4 mt-2 border-t border-slate-100 dark:border-slate-800">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-6 h-6 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center text-xs font-bold border border-emerald-200/60 dark:border-emerald-800/60">
+                      <Users className="w-3.5 h-3.5" />
+                    </div>
+                    <h3 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                      Refer a Friend <span className="text-slate-400 font-normal text-xs">(Optional)</span>
+                    </h3>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-3">
+                    Know a talented peer who would be a great candidate? Provide their details below.
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label htmlFor="referFirstName" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        First Name
+                      </label>
+                      <input
+                        id="referFirstName"
+                        type="text"
+                        value={formData.referFirstName || ''}
+                        onChange={(e) => handleChange('referFirstName', e.target.value)}
+                        placeholder="e.g. Rahul"
+                        className="w-full px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="referMiddleName" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Middle Name
+                      </label>
+                      <input
+                        id="referMiddleName"
+                        type="text"
+                        value={formData.referMiddleName || ''}
+                        onChange={(e) => handleChange('referMiddleName', e.target.value)}
+                        placeholder="e.g. Kumar"
+                        className="w-full px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="referLastName" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Last Name
+                      </label>
+                      <input
+                        id="referLastName"
+                        type="text"
+                        value={formData.referLastName || ''}
+                        onChange={(e) => handleChange('referLastName', e.target.value)}
+                        placeholder="e.g. Sharma"
+                        className="w-full px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3">
+                    <div>
+                      <label htmlFor="referPhone" className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Phone Number <span className="text-slate-400 font-normal">(10 digits)</span>
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="referPhone"
+                          type="tel"
+                          maxLength={10}
+                          value={formData.referPhone || ''}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+                            handleChange('referPhone', val);
+                          }}
+                          placeholder="e.g. 9876543210"
+                          className={`w-full pl-8 pr-3 py-2 rounded-xl border text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 transition-all ${
+                            formErrors.referPhone
+                              ? 'border-red-400 focus:ring-red-500/20'
+                              : 'border-slate-200 dark:border-slate-700 focus:ring-blue-500/20 focus:border-blue-500'
+                          }`}
+                        />
+                        <Phone className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      </div>
+                      {formErrors.referPhone && (
+                        <p className="text-[11px] text-red-500 mt-1 flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" /> {formErrors.referPhone}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {/* Step 1 Action Bar */}
@@ -755,7 +1089,7 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
                       Step 2: Experience &amp; Professional Background
                     </h2>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Select your experience track and provide academic or employment background
+                      Upload your resume to auto-fill details, or select your track and complete manually
                     </p>
                   </div>
                 </div>
@@ -766,6 +1100,121 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
 
               {/* Body */}
               <div className="p-6 sm:p-8 space-y-5">
+                {/* 1. Fast-Track Resume Upload & Auto-fill Section */}
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setStep2DragOver(true);
+                  }}
+                  onDragLeave={() => setStep2DragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setStep2DragOver(false);
+                    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                      handleResumeAutoFillUpload(e.dataTransfer.files[0]);
+                    }
+                  }}
+                  className={`p-5 rounded-2xl border transition-all relative overflow-hidden ${
+                    step2DragOver
+                      ? 'border-blue-500 bg-blue-500/10 shadow-lg'
+                      : 'bg-gradient-to-r from-blue-50/90 via-indigo-50/70 to-slate-50 dark:from-blue-950/40 dark:via-indigo-950/30 dark:to-slate-900 border-blue-200/90 dark:border-blue-800/60 shadow-xs'
+                  }`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="p-1.5 rounded-lg bg-blue-600 text-white shadow-xs">
+                          <Sparkles className="w-4 h-4" />
+                        </span>
+                        <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                          Auto-Fill Experience &amp; Skills with Resume
+                        </h3>
+                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
+                          Smart Parsing
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-600 dark:text-slate-400 max-w-xl leading-relaxed">
+                        Upload your CV / Resume (PDF or DOCX). Our system will automatically detect whether you are a Fresher or Experienced candidate and auto-fill all career, qualification, and skill fields below.
+                      </p>
+                    </div>
+
+                    <div className="shrink-0 flex items-center gap-2">
+                      <input
+                        id="resumeAutoFillInput"
+                        type="file"
+                        accept=".pdf,.doc,.docx"
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files.length > 0) {
+                            handleResumeAutoFillUpload(e.target.files[0]);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        disabled={isParsingResume}
+                        onClick={() => document.getElementById('resumeAutoFillInput')?.click()}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-md shadow-blue-600/20 transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {isParsingResume ? (
+                          <>
+                            <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            <span>Analyzing Resume...</span>
+                          </>
+                        ) : (
+                          <>
+                            <UploadCloud className="w-4 h-4" />
+                            <span>{formData.resumeFile ? 'Re-upload & Re-parse' : 'Upload Resume & Auto-fill'}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Parsing Progress Indicator */}
+                  {isParsingResume && (
+                    <div className="mt-4 pt-3 border-t border-blue-200/60 dark:border-blue-900/60 flex items-center gap-3 text-xs text-blue-700 dark:text-blue-300 animate-pulse">
+                      <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin shrink-0" />
+                      <span>Reading resume document, extracting career track, skills, and background information...</span>
+                    </div>
+                  )}
+
+                  {/* Parsed Success Summary */}
+                  {parsedSummary && !isParsingResume && (
+                    <div className="mt-4 pt-3.5 border-t border-emerald-200/60 dark:border-emerald-900/60">
+                      <div className="flex items-center gap-2 text-xs font-bold text-emerald-700 dark:text-emerald-400 mb-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                        <span>Resume parsed successfully! Auto-filled fields below:</span>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-[11px]">
+                        <span className="px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-bold">
+                          Career Track: {formData.candidateType}
+                        </span>
+                        {parsedSummary.designation && (
+                          <span className="px-2.5 py-1 rounded-lg bg-blue-100 dark:bg-blue-950/60 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800 font-medium">
+                            Role: {parsedSummary.designation}
+                          </span>
+                        )}
+                        {parsedSummary.skillsCount > 0 && (
+                          <span className="px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 font-medium">
+                            {parsedSummary.skillsCount} Skills Detected
+                          </span>
+                        )}
+                        {parsedSummary.education && (
+                          <span className="px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 border border-purple-200 dark:border-purple-800 font-medium">
+                            Education: {parsedSummary.education}
+                          </span>
+                        )}
+                        {formData.resumeFile && (
+                          <span className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium">
+                            Attached: {formData.resumeFile.name}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Career Track Toggle */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">
@@ -1130,7 +1579,7 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
                       }}
                     />
 
-                    {formData.resumeFile ? (
+                    {formData.resumeFile || preUploadedResumePath ? (
                       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-1">
                         <div className="flex items-center gap-3">
                           <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/60 text-emerald-600 dark:text-emerald-300 flex items-center justify-center shrink-0">
@@ -1138,10 +1587,13 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
                           </div>
                           <div className="text-left">
                             <div className="text-xs font-bold text-slate-800 dark:text-slate-100">
-                              {formData.resumeFile.name}
+                              {formData.resumeFile?.name || preUploadedOriginalName || 'Resume Document'}
                             </div>
                             <div className="text-[11px] text-slate-400">
-                              {(formData.resumeFile.size / (1024 * 1024)).toFixed(2)} MB &bull; Document attached
+                              {formData.resumeFile
+                                ? `${(formData.resumeFile.size / (1024 * 1024)).toFixed(2)} MB • `
+                                : ''}
+                              Document attached &amp; ready
                             </div>
                           </div>
                         </div>
@@ -1151,6 +1603,8 @@ export const CandidateForm: React.FC<CandidateFormProps> = ({
                           onClick={(e) => {
                             e.stopPropagation();
                             handleChange('resumeFile', null);
+                            setPreUploadedResumePath(null);
+                            setPreUploadedOriginalName(null);
                           }}
                           className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
                         >

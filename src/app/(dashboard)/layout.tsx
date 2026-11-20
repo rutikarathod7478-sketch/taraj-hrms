@@ -72,7 +72,11 @@ export default function DashboardLayout({
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top Navbar */}
-        <AppNavbar user={user} onLogout={handleLogout} />
+        <AppNavbar
+          user={user}
+          onLogout={handleLogout}
+          onUserUpdate={(updatedUser) => setUser(updatedUser)}
+        />
 
         {/* Page Workspace */}
         <main className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-8 py-6">

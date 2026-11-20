@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+import { put } from '@vercel/blob';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { query, execute } from '@/lib/db/mysql';
 import { withTransaction } from '@/lib/db/transaction';
@@ -282,6 +284,7 @@ export interface OnboardingCandidateItem {
   candidate_name?: string;
   email: string;
   phone: string;
+  address?: string | null;
   candidate_type?: 'Fresher' | 'Experienced' | string;
   experience_years?: number;
   department_name: string;
@@ -299,6 +302,7 @@ export interface OnboardingCandidateItem {
   employee_id?: number | null;
   offered_salary?: string | null;
   proposed_ctc?: string | number | null;
+  expected_ctc?: string | null;
   offer_letter_path?: string | null;
   round_1_score?: number | string | null;
   round_2_score?: number | string | null;
@@ -316,8 +320,10 @@ export async function getOnboardingList(): Promise<OnboardingCandidateItem[]> {
       c.full_name,
       c.email,
       c.phone,
+      c.address,
       c.candidate_type,
       c.experience_years,
+      c.expected_ctc,
       c.application_status,
       COALESCE(d.name, 'General') AS department_name,
       COALESCE(d.code, 'GEN') AS department_code,
@@ -380,6 +386,7 @@ export async function getOnboardingList(): Promise<OnboardingCandidateItem[]> {
       full_name: String(r.full_name),
       email: String(r.email),
       phone: String(r.phone),
+      address: r.address ? String(r.address) : null,
       candidate_type: candidateType,
       experience_years: r.experience_years ? Number(r.experience_years) : 0,
       department_name: String(r.department_name),
@@ -396,6 +403,7 @@ export async function getOnboardingList(): Promise<OnboardingCandidateItem[]> {
       progress,
       employee_id: r.employee_id ? Number(r.employee_id) : null,
       offered_salary: r.offered_salary ? String(r.offered_salary) : null,
+      expected_ctc: r.expected_ctc ? String(r.expected_ctc) : null,
       round_1_score: r.round_1_score,
       round_2_score: r.round_2_score,
       round_3_score: r.round_3_score,
@@ -1053,7 +1061,7 @@ export function getOfferLetterTemplatePath(): string | null {
 }
 
 /**
- * Generate official offer letter PDF using saved file, template or programmatic PDF layout
+ * Generate official offer letter PDF using saved file, or dynamic builder with candidate details
  */
 export async function generateOfferLetterPdf(params: {
   candidateId: number;
@@ -1061,31 +1069,46 @@ export async function generateOfferLetterPdf(params: {
   joiningDate?: string;
 }): Promise<Uint8Array> {
   const customSavedPath = path.join(process.cwd(), 'public', 'uploads', 'offer_letters', `offer_letter_${params.candidateId}.pdf`);
-  const templatePath = getOfferLetterTemplatePath();
-  const templateMtime = templatePath && fs.existsSync(templatePath) ? fs.statSync(templatePath).mtimeMs : 0;
-  const customMtime = fs.existsSync(customSavedPath) ? fs.statSync(customSavedPath).mtimeMs : 0;
 
-  // If a custom saved file exists and is strictly newer than the template file, use it
-  if (fs.existsSync(customSavedPath) && customMtime >= templateMtime) {
+  // If a custom saved file exists for this candidate, use it
+  if (fs.existsSync(customSavedPath)) {
     return fs.readFileSync(customSavedPath);
-  }
-
-  // If a template exists in public/templates (or public/templete), use the template PDF!
-  if (templatePath && fs.existsSync(templatePath)) {
-    return fs.readFileSync(templatePath);
   }
 
   const candidate = await getCandidateById(params.candidateId);
   if (!candidate) throw new Error('Candidate not found.');
 
+  let joiningDate = params.joiningDate;
+  let salary = params.salary;
+
+  if (!joiningDate || !salary) {
+    try {
+      const jrRows = await query<RowDataPacket[]>(
+        'SELECT confirmed_joining_date, proposed_joining_date FROM joining_records WHERE candidate_id = ? LIMIT 1',
+        [params.candidateId]
+      );
+      if (jrRows && jrRows.length > 0) {
+        if (!joiningDate) joiningDate = jrRows[0].confirmed_joining_date || jrRows[0].proposed_joining_date;
+      }
+
+      const hdRows = await query<RowDataPacket[]>(
+        'SELECT offered_salary FROM hiring_decisions WHERE candidate_id = ? AND is_current = 1 LIMIT 1',
+        [params.candidateId]
+      );
+      if (hdRows && hdRows.length > 0 && hdRows[0].offered_salary) {
+        if (!salary) salary = hdRows[0].offered_salary;
+      }
+    } catch {}
+  }
+
   return await buildOfferLetterPdfDoc({
     candidateId: params.candidateId,
     candidateName: candidate.full_name,
     candidateEmail: candidate.email,
-    designation: candidate.position_title,
-    department: candidate.department_name,
-    annualCtc: params.salary || candidate.expected_ctc || 'INR 6,00,000 per annum',
-    joiningDate: params.joiningDate || undefined,
+    designation: candidate.position_title || 'Software Specialist',
+    department: candidate.department_name || 'Operations',
+    annualCtc: salary || candidate.expected_ctc || 'INR 6,00,000 per annum',
+    joiningDate: joiningDate ? String(joiningDate).slice(0, 10) : undefined,
   });
 }
 
@@ -1093,14 +1116,7 @@ export async function generateOfferLetterPdf(params: {
  * Save custom offer letter generated from the interactive Offer Letter Form
  */
 export async function saveCustomOfferLetter(params: CustomOfferLetterInput): Promise<{ filePath: string; fileName: string }> {
-  const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'offer_letters');
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-  }
-
   const fileName = `offer_letter_${params.candidateId}.pdf`;
-  const filePathOnDisk = path.join(uploadsDir, fileName);
-  const relativeWebPath = `/uploads/offer_letters/${fileName}`;
 
   let pdfBytes: Uint8Array;
   if (params.pdfBase64) {
@@ -1115,7 +1131,40 @@ export async function saveCustomOfferLetter(params: CustomOfferLetterInput): Pro
     }
   }
 
-  fs.writeFileSync(filePathOnDisk, pdfBytes);
+  const blobToken = process.env.BLOB_READ_WRITE_TOKEN || process.env.HRMS_DOCUMENTS_READ_WRITE_TOKEN;
+  let relativeWebPath = `/uploads/offer_letters/${fileName}`;
+
+  if (blobToken) {
+    try {
+      const blob = await put(`offer_letters/${fileName}`, Buffer.from(pdfBytes), {
+        access: 'private',
+        contentType: 'application/pdf',
+        token: blobToken,
+        addRandomSuffix: false,
+      });
+      relativeWebPath = `/api/onboarding?action=view_document&filePath=${encodeURIComponent(blob.url)}`;
+    } catch (blobErr) {
+      console.warn('[OnboardingService] Error saving offer letter to Blob:', blobErr);
+    }
+  }
+
+  // Fallback to local filesystem or /tmp
+  if (!relativeWebPath.startsWith('/api/')) {
+    const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'offer_letters');
+    let filePathOnDisk = path.join(uploadsDir, fileName);
+    try {
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+      fs.writeFileSync(filePathOnDisk, pdfBytes);
+    } catch {
+      const tmpDir = path.join(os.tmpdir(), 'offer_letters');
+      fs.mkdirSync(tmpDir, { recursive: true });
+      filePathOnDisk = path.join(tmpDir, fileName);
+      fs.writeFileSync(filePathOnDisk, pdfBytes);
+      relativeWebPath = `/api/onboarding?action=view_document&filePath=uploads/offer_letters/${fileName}`;
+    }
+  }
 
   // Update candidate joining record offer status & checklist
   try {
@@ -1176,38 +1225,417 @@ export interface CustomAppointmentLetterInput {
 }
 
 /**
+ * Programmatic 2-Page A4 Appointment Letter PDF builder with exact Taraj Global branding, logos, watermark & layout
+ */
+export async function buildAppointmentLetterPdfDoc(params: CustomAppointmentLetterInput): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const page1 = doc.addPage([595.28, 841.89]); // A4 Page 1
+  const page2 = doc.addPage([595.28, 841.89]); // A4 Page 2
+  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+  const regularFont = await doc.embedFont(StandardFonts.Helvetica);
+  const { width, height } = page1.getSize();
+
+  // Color tokens
+  const blue = rgb(0.012, 0.651, 1.0); // #03A6FF
+  const orange = rgb(1.0, 0.439, 0.0); // #FF7000
+  const green = rgb(0.447, 0.835, 0.412); // #72D569
+  const navy = rgb(0.078, 0.129, 0.239); // #14213D
+  const textDark = rgb(0.122, 0.161, 0.216); // #1F2937
+  const muted = rgb(0.42, 0.447, 0.502); // #6B7280
+  const borderCol = rgb(0.851, 0.871, 0.898); // #D9DEE5
+
+  const candidateName = (params.candidateName || 'Candidate Name').trim();
+  const firstName = candidateName.split(/\s+/)[0] || candidateName;
+  const jobTitle = params.jobTitle || 'Software Specialist';
+  const department = params.department || 'Operations';
+  const officeLocation = params.officeLocation || 'Pune Corporate Office, Maharashtra, India';
+  const startDate = params.startDate || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  const letterDate = params.letterDate || new Date().toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const probation = params.probationPeriod || '3 to 6 months';
+  const workFrom = params.workingHoursFrom || '09:30 AM';
+  const workTo = params.workingHoursTo || '06:30 PM';
+  const daysWeek = params.workingDaysWeek || '5';
+  const noticeProbation = params.noticeProbation || '15 days';
+  const noticeConfirmation = params.noticeConfirmation || '2 months';
+  const returnDays = params.returnWithinDays || '7';
+  const signatory = params.signatoryName || 'Authorized Signatory';
+  const currency = params.currency || 'INR';
+
+  // Address
+  const addr1 = params.addressLine1 || 'Maharashtra, India';
+  const addr2 = params.addressLine2 || '';
+
+  // Compensation amounts
+  const totalCtc = params.totalCtc || '6,00,000';
+  const basic = params.basicSalary || '3,00,000';
+  const hra = params.hra || '1,50,000';
+  const special = params.specialAllowances || '1,50,000';
+
+  const refYear = params.refYear || new Date().getFullYear().toString();
+  const refNum = params.refNumber || String(params.candidateId || '001').padStart(3, '0');
+  const refNo = `TGS/HR/APP/${refYear}/${refNum}`;
+
+  // Helper: Draw Watermark TG Icon on a given page
+  const iconPath = path.join(process.cwd(), 'public', 'logos', 'tg-icon.png');
+  let iconImg: any = null;
+  if (fs.existsSync(iconPath)) {
+    try {
+      const iconBytes = fs.readFileSync(iconPath);
+      iconImg = await doc.embedPng(iconBytes);
+    } catch {}
+  }
+
+  const applyWatermark = (p: typeof page1) => {
+    if (iconImg) {
+      const wmWidth = 320;
+      const wmHeight = (iconImg.height / iconImg.width) * wmWidth;
+      p.drawImage(iconImg, {
+        x: (width - wmWidth) / 2,
+        y: (height - wmHeight) / 2,
+        width: wmWidth,
+        height: wmHeight,
+        opacity: 0.08,
+      });
+    }
+  };
+
+  applyWatermark(page1);
+  applyWatermark(page2);
+
+  // Helper for 3-color stripe
+  function drawStripe(targetPage: typeof page1, y: number) {
+    const segW = (width - 80) / 3;
+    targetPage.drawRectangle({ x: 40, y, width: segW, height: 2.5, color: orange });
+    targetPage.drawRectangle({ x: 40 + segW, y, width: segW, height: 2.5, color: green });
+    targetPage.drawRectangle({ x: 40 + segW * 2, y, width: segW, height: 2.5, color: blue });
+  }
+
+  // Load Full Logo
+  const logoPath = path.join(process.cwd(), 'public', 'logos', 'tgs-logo-full.png');
+  let logoImg: any = null;
+  if (fs.existsSync(logoPath)) {
+    try {
+      const logoBytes = fs.readFileSync(logoPath);
+      logoImg = await doc.embedPng(logoBytes);
+    } catch {}
+  }
+
+  // ===================== PAGE 1 =====================
+  let topY = height - 40;
+
+  // Header: Logo on left, Company Address on right
+  if (logoImg) {
+    const logoW = 150;
+    const logoH = (logoImg.height / logoImg.width) * logoW;
+    page1.drawImage(logoImg, {
+      x: 40,
+      y: topY - logoH,
+      width: logoW,
+      height: logoH,
+    });
+  } else {
+    page1.drawText('TARAJ GLOBAL SOLUTIONS', { x: 40, y: topY - 14, size: 14, font: boldFont, color: navy });
+  }
+
+  // Company Address Header Right
+  page1.drawText('Taraj Global Solutions', { x: width - 240, y: topY - 6, size: 9, font: boldFont, color: navy });
+  page1.drawText('The Space Business Complex, Office 512-517', { x: width - 240, y: topY - 17, size: 7.5, font: regularFont, color: muted });
+  page1.drawText('Grant Rd, Kharadi, Pune, Maharashtra 411014', { x: width - 240, y: topY - 27, size: 7.5, font: regularFont, color: muted });
+  page1.drawText('Email: info@tgstechinfo.com', { x: width - 240, y: topY - 37, size: 7.5, font: regularFont, color: blue });
+
+  topY -= 50;
+  drawStripe(page1, topY);
+  topY -= 14;
+
+  // Date and Ref No Row
+  page1.drawText(`Ref No.: ${refNo}`, { x: 40, y: topY, size: 9, font: boldFont, color: textDark });
+  const dateStr = `Date: ${letterDate}`;
+  const dateW = boldFont.widthOfTextAtSize(dateStr, 9);
+  page1.drawText(dateStr, { x: width - 40 - dateW, y: topY, size: 9, font: boldFont, color: textDark });
+  topY -= 16;
+
+  // To Candidate Box
+  page1.drawRectangle({ x: 40, y: topY - 32, width: width - 80, height: 32, color: rgb(0.97, 0.98, 0.99) });
+  page1.drawRectangle({ x: 40, y: topY - 32, width: 3.5, height: 32, color: blue });
+  page1.drawText(`To: ${candidateName}`, { x: 50, y: topY - 12, size: 9.5, font: boldFont, color: textDark });
+  const fullAddr = addr2 ? `${addr1}, ${addr2}` : addr1;
+  page1.drawText(`Address: ${fullAddr}`, { x: 50, y: topY - 24, size: 8.5, font: regularFont, color: muted, maxWidth: width - 110 });
+  topY -= 42;
+
+  // Title: LETTER OF APPOINTMENT
+  const titleText = 'LETTER OF APPOINTMENT';
+  const titleW = boldFont.widthOfTextAtSize(titleText, 13);
+  page1.drawText(titleText, { x: (width - titleW) / 2, y: topY, size: 13, font: boldFont, color: navy });
+  page1.drawRectangle({ x: (width - 70) / 2, y: topY - 4, width: 70, height: 2, color: orange });
+  topY -= 18;
+
+  // Salutation & Intro
+  page1.drawText(`Dear ${firstName},`, { x: 40, y: topY, size: 9.5, font: boldFont, color: textDark });
+  topY -= 13;
+
+  const introText = `With reference to your application and subsequent interviews, we are pleased to appoint you as ${jobTitle} in the ${department} Department at Taraj Global Solutions ('the Company'), subject to the terms and conditions outlined below:`;
+  page1.drawText(introText, { x: 40, y: topY, size: 9, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12.5 });
+  topY -= 30;
+
+  // Clause 1: Commencement and Term
+  page1.drawCircle({ x: 46, y: topY + 3.5, size: 6.5, color: blue });
+  page1.drawText('1', { x: 44, y: topY + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page1.drawText('COMMENCEMENT & PROBATION', { x: 56, y: topY, size: 9, font: boldFont, color: navy });
+  page1.drawRectangle({ x: 215, y: topY + 3, width: width - 255, height: 0.8, color: borderCol });
+  topY -= 12;
+
+  const clause1Text = `Your appointment is effective from ${startDate}. You will be on probation for a period of ${probation} from your date of joining. Upon satisfactory completion of probation, your employment may be confirmed in writing by the management.`;
+  page1.drawText(clause1Text, { x: 40, y: topY, size: 8.5, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12 });
+  topY -= 26;
+
+  // Clause 2: Place of Posting & Working Hours
+  page1.drawCircle({ x: 46, y: topY + 3.5, size: 6.5, color: blue });
+  page1.drawText('2', { x: 44, y: topY + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page1.drawText('PLACE OF POSTING & WORKING HOURS', { x: 56, y: topY, size: 9, font: boldFont, color: navy });
+  page1.drawRectangle({ x: 245, y: topY + 3, width: width - 285, height: 0.8, color: borderCol });
+  topY -= 12;
+
+  const clause2Text = `Your initial place of posting will be at our office in ${officeLocation}. Your standard working hours will be from ${workFrom} to ${workTo}, ${daysWeek} days per week, or as scheduled according to operational requirements.`;
+  page1.drawText(clause2Text, { x: 40, y: topY, size: 8.5, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12 });
+  topY -= 26;
+
+  // Clause 3: Compensation & Remuneration
+  page1.drawCircle({ x: 46, y: topY + 3.5, size: 6.5, color: blue });
+  page1.drawText('3', { x: 44, y: topY + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page1.drawText('COMPENSATION & REMUNERATION (PER ANNUM)', { x: 56, y: topY, size: 9, font: boldFont, color: navy });
+  page1.drawRectangle({ x: 295, y: topY + 3, width: width - 335, height: 0.8, color: borderCol });
+  topY -= 12;
+
+  page1.drawText(`You will receive an annual Cost to Company (CTC) of ${currency} ${totalCtc}. The structured breakup is set forth below:`, {
+    x: 40,
+    y: topY,
+    size: 8.5,
+    font: regularFont,
+    color: textDark,
+  });
+  topY -= 12;
+
+  // Compensation Table (4 rows)
+  const tblX = 40;
+  const tblW = width - 80;
+  const rH = 16;
+  const colW1 = tblW * 0.65;
+
+  const compRows = [
+    ['Basic Salary', `${currency} ${basic}`],
+    ['House Rent Allowance (HRA)', `${currency} ${hra}`],
+    ['Special & Performance Allowances', `${currency} ${special}`],
+    ['Total Cost to Company (CTC)', `${currency} ${totalCtc}`],
+  ];
+
+  // Table header
+  page1.drawRectangle({ x: tblX, y: topY - rH, width: tblW, height: rH, color: rgb(0.95, 0.96, 0.98), borderColor: borderCol, borderWidth: 0.8 });
+  page1.drawText('Salary Component', { x: tblX + 8, y: topY - rH + 4.5, size: 8.5, font: boldFont, color: navy });
+  const amtHeader = `Annual Amount (${currency})`;
+  const amtHW = boldFont.widthOfTextAtSize(amtHeader, 8.5);
+  page1.drawText(amtHeader, { x: tblX + tblW - amtHW - 8, y: topY - rH + 4.5, size: 8.5, font: boldFont, color: navy });
+  topY -= rH;
+
+  for (let i = 0; i < compRows.length; i++) {
+    const isTotal = i === compRows.length - 1;
+    const rowY = topY - rH;
+    page1.drawRectangle({
+      x: tblX,
+      y: rowY,
+      width: tblW,
+      height: rH,
+      color: isTotal ? rgb(0.94, 0.97, 1.0) : rgb(1, 1, 1),
+      borderColor: isTotal ? navy : borderCol,
+      borderWidth: isTotal ? 1 : 0.8,
+    });
+    page1.drawLine({ start: { x: tblX + colW1, y: rowY }, end: { x: tblX + colW1, y: rowY + rH }, color: borderCol, thickness: 0.8 });
+
+    const fontToUse = isTotal ? boldFont : regularFont;
+    const colorToUse = isTotal ? navy : textDark;
+    page1.drawText(compRows[i][0], { x: tblX + 8, y: rowY + 4.5, size: 8.5, font: fontToUse, color: colorToUse });
+    const valText = compRows[i][1];
+    const valW = fontToUse.widthOfTextAtSize(valText, 8.5);
+    page1.drawText(valText, { x: tblX + tblW - valW - 8, y: rowY + 4.5, size: 8.5, font: fontToUse, color: colorToUse });
+    topY -= rH;
+  }
+
+  topY -= 12;
+  page1.drawText('* Statutory deductions such as Income Tax (TDS), Professional Tax, and Provident Fund (if applicable) shall be made as per prevailing government regulations.', {
+    x: 40,
+    y: topY,
+    size: 7.5,
+    font: regularFont,
+    color: muted,
+    maxWidth: width - 80,
+  });
+
+  // Page 1 Footer
+  drawStripe(page1, 36);
+  page1.drawText('Taraj Global Solutions | Confidential Appointment Documentation', { x: 40, y: 24, size: 7.5, font: regularFont, color: muted });
+  page1.drawText('Page 1 of 2', { x: width - 40 - regularFont.widthOfTextAtSize('Page 1 of 2', 7.5), y: 24, size: 7.5, font: regularFont, color: muted });
+
+  // ===================== PAGE 2 =====================
+  let p2Y = height - 40;
+
+  // Page 2 Header: Logo / Brand Name left, Ref No right
+  if (logoImg) {
+    const p2LogoW = 110;
+    const p2LogoH = (logoImg.height / logoImg.width) * p2LogoW;
+    page2.drawImage(logoImg, {
+      x: 40,
+      y: p2Y - p2LogoH,
+      width: p2LogoW,
+      height: p2LogoH,
+    });
+  } else {
+    page2.drawText('TARAJ GLOBAL SOLUTIONS', { x: 40, y: p2Y - 14, size: 12, font: boldFont, color: navy });
+  }
+
+  page2.drawText(`Ref No.: ${refNo}`, { x: width - 40 - boldFont.widthOfTextAtSize(`Ref No.: ${refNo}`, 8.5), y: p2Y - 14, size: 8.5, font: boldFont, color: muted });
+
+  p2Y -= 36;
+  drawStripe(page2, p2Y);
+  p2Y -= 18;
+
+  // Clause 4: Duties and Responsibilities
+  page2.drawCircle({ x: 46, y: p2Y + 3.5, size: 6.5, color: blue });
+  page2.drawText('4', { x: 44, y: p2Y + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page2.drawText('DUTIES & CODE OF CONDUCT', { x: 56, y: p2Y, size: 9, font: boldFont, color: navy });
+  page2.drawRectangle({ x: 195, y: p2Y + 3, width: width - 235, height: 0.8, color: borderCol });
+  p2Y -= 12;
+
+  const clause4Text = 'You shall devote your whole time, skill, and attention exclusively to the business of the Company. You will faithfully perform all duties entrusted to you and adhere strictly to all company policies, ethics, security regulations, and management instructions.';
+  page2.drawText(clause4Text, { x: 40, y: p2Y, size: 8.5, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12 });
+  p2Y -= 28;
+
+  // Clause 5: Confidentiality & Intellectual Property
+  page2.drawCircle({ x: 46, y: p2Y + 3.5, size: 6.5, color: blue });
+  page2.drawText('5', { x: 44, y: p2Y + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page2.drawText('CONFIDENTIALITY & INTELLECTUAL PROPERTY', { x: 56, y: p2Y, size: 9, font: boldFont, color: navy });
+  page2.drawRectangle({ x: 275, y: p2Y + 3, width: width - 315, height: 0.8, color: borderCol });
+  p2Y -= 12;
+
+  const clause5Text = 'You will maintain strict confidentiality regarding all proprietary software, trade secrets, client data, business plans, and commercial processes of Taraj Global Solutions. All intellectual property, code, designs, and innovations developed by you during employment remain the sole property of the Company.';
+  page2.drawText(clause5Text, { x: 40, y: p2Y, size: 8.5, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12 });
+  p2Y -= 32;
+
+  // Clause 6: Notice Period & Separation
+  page2.drawCircle({ x: 46, y: p2Y + 3.5, size: 6.5, color: blue });
+  page2.drawText('6', { x: 44, y: p2Y + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page2.drawText('NOTICE PERIOD & TERMINATION', { x: 56, y: p2Y, size: 9, font: boldFont, color: navy });
+  page2.drawRectangle({ x: 215, y: p2Y + 3, width: width - 255, height: 0.8, color: borderCol });
+  p2Y -= 12;
+
+  const clause6Text = `During the probation period, either party may terminate this employment by giving ${noticeProbation} prior written notice or basic salary in lieu thereof. Upon confirmation, the notice period required by either party shall be ${noticeConfirmation}.`;
+  page2.drawText(clause6Text, { x: 40, y: p2Y, size: 8.5, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12 });
+  p2Y -= 28;
+
+  // Clause 7: Verification of Credentials
+  page2.drawCircle({ x: 46, y: p2Y + 3.5, size: 6.5, color: blue });
+  page2.drawText('7', { x: 44, y: p2Y + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page2.drawText('VERIFICATION OF DOCUMENTS', { x: 56, y: p2Y, size: 9, font: boldFont, color: navy });
+  page2.drawRectangle({ x: 210, y: p2Y + 3, width: width - 250, height: 0.8, color: borderCol });
+  p2Y -= 12;
+
+  const clause7Text = 'This appointment is subject to satisfactory verification of all educational certificates, previous employment records, background checks, and identity proofs submitted by you. Any false declaration or concealment of material facts will lead to immediate termination.';
+  page2.drawText(clause7Text, { x: 40, y: p2Y, size: 8.5, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12 });
+  p2Y -= 28;
+
+  // Clause 8: Acceptance
+  page2.drawCircle({ x: 46, y: p2Y + 3.5, size: 6.5, color: blue });
+  page2.drawText('8', { x: 44, y: p2Y + 1, size: 7.5, font: boldFont, color: rgb(1, 1, 1) });
+  page2.drawText('ACCEPTANCE OF APPOINTMENT', { x: 56, y: p2Y, size: 9, font: boldFont, color: navy });
+  page2.drawRectangle({ x: 215, y: p2Y + 3, width: width - 255, height: 0.8, color: borderCol });
+  p2Y -= 12;
+
+  const clause8Text = `Please sign and return the duplicate copy of this letter within ${returnDays} days from receipt as a token of your formal acceptance of the terms and conditions set forth herein.`;
+  page2.drawText(clause8Text, { x: 40, y: p2Y, size: 8.5, font: regularFont, color: textDark, maxWidth: width - 80, lineHeight: 12 });
+  p2Y -= 24;
+
+  // Closing
+  page2.drawText('We welcome you warmly to Taraj Global Solutions and wish you great professional success.', {
+    x: 40,
+    y: p2Y,
+    size: 8.5,
+    font: regularFont,
+    color: textDark,
+  });
+  p2Y -= 36;
+
+  // Dual Signatures
+  const sigColW = (width - 120) / 2;
+
+  // Left Signatory (Company)
+  page2.drawLine({ start: { x: 40, y: p2Y }, end: { x: 40 + sigColW, y: p2Y }, color: navy, thickness: 1 });
+  page2.drawText('For Taraj Global Solutions', { x: 40, y: p2Y - 12, size: 9, font: boldFont, color: navy });
+  page2.drawText(signatory, { x: 40, y: p2Y - 23, size: 8.5, font: boldFont, color: textDark });
+  page2.drawText('Head of Human Resources & Operations', { x: 40, y: p2Y - 33, size: 7.5, font: regularFont, color: muted });
+
+  // Right Signatory (Candidate)
+  const sigRightX = width - 40 - sigColW;
+  page2.drawLine({ start: { x: sigRightX, y: p2Y }, end: { x: width - 40, y: p2Y }, color: navy, thickness: 1 });
+  page2.drawText('Accepted and Acknowledged', { x: sigRightX, y: p2Y - 12, size: 9, font: boldFont, color: navy });
+  page2.drawText(`Name: ${candidateName}`, { x: sigRightX, y: p2Y - 23, size: 8.5, font: boldFont, color: textDark });
+  page2.drawText('Date: _______________', { x: sigRightX, y: p2Y - 33, size: 8.0, font: regularFont, color: textDark });
+
+  // Page 2 Footer
+  drawStripe(page2, 36);
+  page2.drawText('Taraj Global Solutions | Confidential Appointment Documentation', { x: 40, y: 24, size: 7.5, font: regularFont, color: muted });
+  page2.drawText('Page 2 of 2', { x: width - 40 - regularFont.widthOfTextAtSize('Page 2 of 2', 7.5), y: 24, size: 7.5, font: regularFont, color: muted });
+
+  return await doc.save();
+}
+
+/**
  * Save custom appointment letter generated from the interactive Appointment Letter Form
  */
 export async function saveCustomAppointmentLetter(
   params: CustomAppointmentLetterInput
 ): Promise<{ filePath: string; fileName: string }> {
-  const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'appointment_letters');
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-  }
-
   const fileName = `appointment_letter_${params.candidateId}.pdf`;
-  const filePathOnDisk = path.join(uploadsDir, fileName);
-  const relativeWebPath = `/uploads/appointment_letters/${fileName}`;
 
   let pdfBytes: Uint8Array;
   if (params.pdfBase64) {
     const base64Data = params.pdfBase64.replace(/^data:application\/pdf;base64,/, '');
     pdfBytes = Buffer.from(base64Data, 'base64');
   } else {
-    // If template exists in public/templates/apptgs.pdf, use that as base
-    const templatePath = path.join(process.cwd(), 'public', 'templates', 'apptgs.pdf');
-    if (fs.existsSync(templatePath)) {
-      pdfBytes = fs.readFileSync(templatePath);
-    } else {
-      const doc = await PDFDocument.create();
-      doc.addPage([595.28, 841.89]);
-      doc.addPage([595.28, 841.89]);
-      pdfBytes = await doc.save();
+    pdfBytes = await buildAppointmentLetterPdfDoc(params);
+  }
+
+  const blobToken = process.env.BLOB_READ_WRITE_TOKEN || process.env.HRMS_DOCUMENTS_READ_WRITE_TOKEN;
+  let relativeWebPath = `/uploads/appointment_letters/${fileName}`;
+
+  if (blobToken) {
+    try {
+      const blob = await put(`appointment_letters/${fileName}`, Buffer.from(pdfBytes), {
+        access: 'private',
+        contentType: 'application/pdf',
+        token: blobToken,
+        addRandomSuffix: false,
+      });
+      relativeWebPath = `/api/onboarding?action=view_document&filePath=${encodeURIComponent(blob.url)}`;
+    } catch (blobErr) {
+      console.warn('[OnboardingService] Error saving appointment letter to Blob:', blobErr);
     }
   }
 
-  fs.writeFileSync(filePathOnDisk, pdfBytes);
+  // Fallback to local filesystem or /tmp
+  if (!relativeWebPath.startsWith('/api/')) {
+    const uploadsDir = path.join(process.cwd(), 'public', 'uploads', 'appointment_letters');
+    let filePathOnDisk = path.join(uploadsDir, fileName);
+    try {
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+      fs.writeFileSync(filePathOnDisk, pdfBytes);
+    } catch {
+      const tmpDir = path.join(os.tmpdir(), 'appointment_letters');
+      fs.mkdirSync(tmpDir, { recursive: true });
+      filePathOnDisk = path.join(tmpDir, fileName);
+      fs.writeFileSync(filePathOnDisk, pdfBytes);
+      relativeWebPath = `/api/onboarding?action=view_document&filePath=uploads/appointment_letters/${fileName}`;
+    }
+  }
 
   // Update candidate joining record offer status & checklist
   try {
@@ -1268,10 +1696,12 @@ export function getAppointmentLetterTemplatePath(): string | null {
 }
 
 /**
- * Retrieve or generate Appointment Letter PDF (uses custom uploaded PDF or template)
+ * Retrieve or generate Appointment Letter PDF with candidate details
  */
 export async function getOrGenerateAppointmentLetterPdf(params: {
   candidateId: number;
+  salary?: string;
+  joiningDate?: string;
 }): Promise<Uint8Array> {
   const customSavedPath = path.join(
     process.cwd(),
@@ -1280,22 +1710,76 @@ export async function getOrGenerateAppointmentLetterPdf(params: {
     'appointment_letters',
     `appointment_letter_${params.candidateId}.pdf`
   );
-  const templatePath = getAppointmentLetterTemplatePath();
-  const templateMtime = templatePath && fs.existsSync(templatePath) ? fs.statSync(templatePath).mtimeMs : 0;
-  const customMtime = fs.existsSync(customSavedPath) ? fs.statSync(customSavedPath).mtimeMs : 0;
 
-  if (fs.existsSync(customSavedPath) && customMtime >= templateMtime) {
+  // If a custom saved file exists for this candidate, use it
+  if (fs.existsSync(customSavedPath)) {
     return fs.readFileSync(customSavedPath);
   }
 
-  if (templatePath && fs.existsSync(templatePath)) {
-    return fs.readFileSync(templatePath);
+  const candidate = await getCandidateById(params.candidateId);
+  if (!candidate) throw new Error('Candidate not found.');
+
+  let joiningDate = params.joiningDate;
+  let salary = params.salary;
+
+  if (!joiningDate || !salary) {
+    try {
+      const jrRows = await query<RowDataPacket[]>(
+        'SELECT confirmed_joining_date, proposed_joining_date FROM joining_records WHERE candidate_id = ? LIMIT 1',
+        [params.candidateId]
+      );
+      if (jrRows && jrRows.length > 0) {
+        if (!joiningDate) joiningDate = jrRows[0].confirmed_joining_date || jrRows[0].proposed_joining_date;
+      }
+
+      const hdRows = await query<RowDataPacket[]>(
+        'SELECT offered_salary FROM hiring_decisions WHERE candidate_id = ? AND is_current = 1 LIMIT 1',
+        [params.candidateId]
+      );
+      if (hdRows && hdRows.length > 0 && hdRows[0].offered_salary) {
+        if (!salary) salary = hdRows[0].offered_salary;
+      }
+    } catch {}
   }
 
-  const doc = await PDFDocument.create();
-  doc.addPage([595.28, 841.89]);
-  doc.addPage([595.28, 841.89]);
-  return await doc.save();
+  const ctcValue = salary || candidate.expected_ctc || '6,00,000';
+  const numericCtc = parseFloat(String(ctcValue).replace(/[^0-9.]/g, '')) || 600000;
+  const basic = Math.round(numericCtc * 0.5);
+  const hra = Math.round(numericCtc * 0.25);
+  const special = numericCtc - basic - hra;
+
+  const formatInr = (n: number) => {
+    return n.toLocaleString('en-IN');
+  };
+
+  const address = candidate.address || '';
+  const addrParts = address.split('\n').map((s: string) => s.trim()).filter(Boolean);
+  const addr1 = addrParts[0] || (address ? address.slice(0, 45) : 'Maharashtra, India');
+  const addr2 = addrParts.length > 1 ? addrParts.slice(1).join(', ') : (address.length > 45 ? address.slice(45) : 'India');
+
+  return await buildAppointmentLetterPdfDoc({
+    candidateId: params.candidateId,
+    candidateName: candidate.full_name,
+    addressLine1: addr1,
+    addressLine2: addr2,
+    jobTitle: candidate.position_title || 'Software Specialist',
+    department: candidate.department_name || 'Operations',
+    officeLocation: 'Pune Corporate Office, Maharashtra, India',
+    startDate: joiningDate ? String(joiningDate).slice(0, 10) : undefined,
+    currency: 'INR',
+    basicSalary: formatInr(basic),
+    hra: formatInr(hra),
+    specialAllowances: formatInr(special),
+    totalCtc: formatInr(numericCtc),
+    probationPeriod: '3 to 6 months',
+    workingHoursFrom: '09:30 AM',
+    workingHoursTo: '06:30 PM',
+    workingDaysWeek: '5',
+    noticeProbation: '15 days',
+    noticeConfirmation: '2 months',
+    returnWithinDays: '7',
+    signatoryName: 'Authorized Signatory',
+  });
 }
 
 

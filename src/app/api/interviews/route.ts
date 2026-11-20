@@ -45,10 +45,38 @@ export async function GET(request: NextRequest) {
 
     // 2. All interviews list for Interview Management dashboard
     // Show only Online mode interviews as requested (Offline in-person interviews are managed separately)
+    const includeCompleted =
+      searchParams.get('include_completed') === 'true' || searchParams.get('include_all') === 'true';
+
     const conditions: string[] = [
       'c.is_archived = 0',
       "LOWER(COALESCE(i.mode, 'Online')) = 'online'",
     ];
+
+    if (!includeCompleted) {
+      // Automatically remove any interview round that is DONE (completed / evaluated / scored / cancelled)
+      // Only active, scheduled, or in-progress interviews should be visible on the interviews dashboard
+      conditions.push(
+        "i.status NOT IN ('completed', 'cancelled')",
+        "i.completed_at IS NULL",
+        "i.total_score IS NULL"
+      );
+
+      // Exclude employees and candidates who have completed all interview rounds
+      conditions.push(
+        'c.id NOT IN (SELECT candidate_id FROM employees WHERE candidate_id IS NOT NULL)',
+        "LOWER(COALESCE(c.application_status, '')) NOT IN ('joined', 'hired', 'offered')",
+        "c.id NOT IN (SELECT candidate_id FROM interviews WHERE round_type = 'final' AND (status = 'completed' OR total_score IS NOT NULL))",
+        'c.id NOT IN (SELECT candidate_id FROM candidate_evaluations WHERE round_3_score IS NOT NULL)',
+        `c.id NOT IN (
+          SELECT candidate_id FROM interviews 
+          WHERE status = 'completed' AND round_type IN ('hr', 'department', 'final')
+          GROUP BY candidate_id 
+          HAVING COUNT(DISTINCT round_type) >= 3
+        )`
+      );
+    }
+
     const params: any[] = [];
 
     if (roundFilter && roundFilter !== 'all') {

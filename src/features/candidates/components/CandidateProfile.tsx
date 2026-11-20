@@ -1,10 +1,11 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import Link from 'next/link';
 import { Candidate } from '@/types/candidate';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
+import { useToast } from '@/components/feedback/ToastProvider';
 import { formatDate, formatDateTime, formatCurrency } from '@/lib/utils';
 import {
   User,
@@ -20,6 +21,9 @@ import {
   Clock,
   ArrowRight,
   ExternalLink,
+  CreditCard,
+  ShieldCheck,
+  Users,
 } from 'lucide-react';
 
 export interface CandidateProfileProps {
@@ -35,6 +39,32 @@ export const CandidateProfile: React.FC<CandidateProfileProps> = ({
   onStatusChange,
   onScheduleInterview,
 }) => {
+  const { showToast } = useToast();
+  const [isResendingEmail, setIsResendingEmail] = useState(false);
+
+  const handleResendConfirmation = async () => {
+    if (!candidate.email) {
+      showToast('Candidate does not have a registered email address.', 'warning');
+      return;
+    }
+    setIsResendingEmail(true);
+    try {
+      const res = await fetch(`/api/candidates/${candidate.id}?action=resend_confirmation`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(data.message || `Confirmation email sent to ${candidate.email}`, 'success');
+      } else {
+        showToast(data.error || 'Failed to dispatch email.', 'error');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Error communicating with server.', 'error');
+    } finally {
+      setIsResendingEmail(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header Profile Summary Card */}
@@ -77,7 +107,11 @@ export const CandidateProfile: React.FC<CandidateProfileProps> = ({
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             {candidate.resume_file_path && (
               <a
-                href={candidate.resume_file_path}
+                href={
+                  candidate.resume_file_path.startsWith('/api/')
+                    ? candidate.resume_file_path
+                    : `/api/onboarding?action=view_document&filePath=${encodeURIComponent(candidate.resume_file_path)}`
+                }
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
@@ -99,6 +133,19 @@ export const CandidateProfile: React.FC<CandidateProfileProps> = ({
                 Decisions
               </Button>
             </Link>
+
+            {candidate.email && (
+              <Button
+                variant="outline"
+                size="sm"
+                icon={<Mail className="w-3.5 h-3.5 text-blue-600" />}
+                onClick={handleResendConfirmation}
+                disabled={isResendingEmail}
+                title="Resend registration confirmation email to candidate"
+              >
+                {isResendingEmail ? 'Sending...' : 'Resend Welcome Email'}
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -177,6 +224,61 @@ export const CandidateProfile: React.FC<CandidateProfileProps> = ({
                 <p className="text-xs text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-950 p-3 rounded-lg border border-slate-200 dark:border-slate-800">
                   {candidate.notes}
                 </p>
+              </div>
+            )}
+          </div>
+
+          {/* Identity & Verification Card */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-4 flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-500" />
+              Identity &amp; Identification Details
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
+                <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                  <CreditCard className="w-3.5 h-3.5 text-blue-500" />
+                  Aadhar Card ID
+                </p>
+                <p className="font-semibold text-slate-800 dark:text-slate-200 mt-1 font-mono tracking-wider">
+                  {candidate.aadhar_id || 'Not Provided'}
+                </p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
+                <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
+                  PAN Card ID
+                </p>
+                <p className="font-semibold text-slate-800 dark:text-slate-200 mt-1 font-mono tracking-wider uppercase">
+                  {candidate.pan_id || 'Not Provided'}
+                </p>
+              </div>
+            </div>
+
+            {(candidate.refer_first_name || candidate.refer_phone) && (
+              <div className="mt-5 pt-4 border-t border-slate-100 dark:border-slate-800">
+                <h4 className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-emerald-500" />
+                  Referred By
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs bg-emerald-50/40 dark:bg-emerald-950/20 p-3 rounded-xl border border-emerald-200/60 dark:border-emerald-800/40">
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Referrer Name</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      {[candidate.refer_first_name, candidate.refer_middle_name, candidate.refer_last_name]
+                        .filter(Boolean)
+                        .join(' ') || '—'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Referrer Contact</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      {candidate.refer_phone || '—'}
+                    </span>
+                  </div>
+                </div>
               </div>
             )}
           </div>

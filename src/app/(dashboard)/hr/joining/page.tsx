@@ -570,6 +570,10 @@ export default function JoiningPage() {
           recipientEmail: targetEmail,
           templateType: selectedLetterType,
           notes: letterNotes,
+          salary:
+            letterModalCandidate.offered_salary ||
+            letterModalCandidate.proposed_ctc ||
+            letterModalCandidate.expected_ctc,
           confirmedJoiningDate:
             letterModalCandidate.confirmed_joining_date || letterModalCandidate.proposed_joining_date,
         }),
@@ -1914,7 +1918,11 @@ export default function JoiningPage() {
                         {/* Document File / View link if uploaded */}
                         {doc.filePath && (
                           <a
-                            href={`/api/onboarding?action=view_document&filePath=${encodeURIComponent(doc.filePath)}`}
+                            href={
+                              doc.filePath.startsWith('/api/')
+                                ? doc.filePath
+                                : `/api/onboarding?action=view_document&filePath=${encodeURIComponent(doc.filePath)}`
+                            }
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 font-semibold text-xs cursor-pointer shadow-2xs shrink-0"
@@ -2359,10 +2367,10 @@ export default function JoiningPage() {
                 className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs transition-colors cursor-pointer shadow-2xs"
               >
                 <FileText className="w-4 h-4 text-white" />
-                <span>View Official Offer Letter (PDF: tgs offerletter.pdf)</span>
+                <span>View Official Offer Letter (PDF)</span>
               </a>
               <a
-                href={`/offer-letter-form.html?candidate_id=${letterModalCandidate.candidate_id}&name=${encodeURIComponent(letterModalCandidate.full_name)}&email=${encodeURIComponent(letterRecipientEmail || letterModalCandidate.email || '')}&designation=${encodeURIComponent(letterModalCandidate.position_title || '')}&department=${encodeURIComponent(letterModalCandidate.department_name || '')}&joining_date=${encodeURIComponent(getCandidateJoiningDateYMD(letterModalCandidate))}&ctc=${encodeURIComponent(letterModalCandidate.offered_salary || '')}`}
+                href={`/offer-letter-form.html?candidate_id=${letterModalCandidate.candidate_id}&name=${encodeURIComponent(letterModalCandidate.full_name)}&email=${encodeURIComponent(letterRecipientEmail || letterModalCandidate.email || '')}&designation=${encodeURIComponent(letterModalCandidate.position_title || '')}&department=${encodeURIComponent(letterModalCandidate.department_name || '')}&joining_date=${encodeURIComponent(getCandidateJoiningDateYMD(letterModalCandidate))}&ctc=${encodeURIComponent(letterModalCandidate.offered_salary || letterModalCandidate.proposed_ctc || letterModalCandidate.expected_ctc || '')}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-semibold text-xs transition-colors cursor-pointer shadow-2xs"
@@ -2382,10 +2390,10 @@ export default function JoiningPage() {
                 className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition-colors cursor-pointer shadow-2xs"
               >
                 <FileCheck className="w-4 h-4 text-white" />
-                <span>View Official Appointment Letter (PDF: apptgs.pdf)</span>
+                <span>View Official Appointment Letter (PDF)</span>
               </a>
               <a
-                href={`/appointment-letter-form.html?candidate_id=${letterModalCandidate.candidate_id}&name=${encodeURIComponent(letterModalCandidate.full_name)}&email=${encodeURIComponent(letterRecipientEmail || letterModalCandidate.email || '')}&designation=${encodeURIComponent(letterModalCandidate.position_title || '')}&department=${encodeURIComponent(letterModalCandidate.department_name || '')}&joining_date=${encodeURIComponent(getCandidateJoiningDateYMD(letterModalCandidate))}&ctc=${encodeURIComponent(letterModalCandidate.offered_salary || '')}`}
+                href={`/appointment-letter-form.html?candidate_id=${letterModalCandidate.candidate_id}&name=${encodeURIComponent(letterModalCandidate.full_name)}&email=${encodeURIComponent(letterRecipientEmail || letterModalCandidate.email || '')}&designation=${encodeURIComponent(letterModalCandidate.position_title || '')}&department=${encodeURIComponent(letterModalCandidate.department_name || '')}&joining_date=${encodeURIComponent(getCandidateJoiningDateYMD(letterModalCandidate))}&ctc=${encodeURIComponent(letterModalCandidate.offered_salary || letterModalCandidate.proposed_ctc || letterModalCandidate.expected_ctc || '')}&address=${encodeURIComponent(letterModalCandidate.address || '')}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-semibold text-xs transition-colors cursor-pointer shadow-2xs"

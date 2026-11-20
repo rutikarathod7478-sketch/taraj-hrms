@@ -31,4 +31,5 @@ export interface UserSession {
   full_name: string;
   role: UserRole;
   department_id: number | null;
+  avatar_url?: string | null;
 }

@@ -97,6 +97,7 @@ export function verifyToken(token: string): UserSession | null {
       full_name: decoded.full_name,
       role: decoded.role,
       department_id: decoded.department_id ?? null,
+      avatar_url: decoded.avatar_url ?? null,
     };
   } catch {
     return null;

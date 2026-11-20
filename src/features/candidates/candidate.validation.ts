@@ -1,4 +1,4 @@
-import { isValidEmail, isValidPhone, isNonEmptyString } from '@/lib/validators/common';
+import { isValidEmail, isValidPhone, isValidAadhar, isValidPan, isValid10DigitPhone, isNonEmptyString } from '@/lib/validators/common';
 
 export interface CandidateFormState {
   firstName: string;
@@ -9,6 +9,8 @@ export interface CandidateFormState {
   email: string;
   mobileNumber: string;
   alternateContact?: string;
+  aadharId?: string;
+  panId?: string;
   location: string;
   profilePhoto?: string;
   candidateType: 'Fresher' | 'Experienced';
@@ -25,6 +27,11 @@ export interface CandidateFormState {
   expectedCtc?: string;
   noticePeriod?: string | number;
   notes?: string;
+  // Referral fields
+  referFirstName?: string;
+  referMiddleName?: string;
+  referLastName?: string;
+  referPhone?: string;
   resumeFile?: File | null;
 }
 
@@ -53,7 +60,19 @@ export function validateCandidateForm(data: CandidateFormState, isCvRequired: bo
   }
 
   if (!isValidPhone(data.mobileNumber)) {
-    errors.mobileNumber = 'A valid 10 to 15 digit mobile number is required.';
+    errors.mobileNumber = 'A valid 10-digit mobile number is required.';
+  }
+
+  if (!isValidAadhar(data.aadharId || '')) {
+    errors.aadharId = 'Aadhar card number must be exactly 12 digits.';
+  }
+
+  if (!isValidPan(data.panId || '')) {
+    errors.panId = 'PAN card must be exactly 10 characters (e.g. ABCDE1234F).';
+  }
+
+  if (data.referPhone && data.referPhone.trim() !== '' && !isValid10DigitPhone(data.referPhone)) {
+    errors.referPhone = 'Referral phone number must be exactly 10 digits.';
   }
 
   if (!data.departmentId || Number(data.departmentId) <= 0) {
